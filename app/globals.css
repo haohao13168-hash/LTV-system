@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================
+   Theme tokens
+   ============================================================ */
+
+/* Dark (default) */
+:root,
+[data-theme="dark"] {
+  --color-background:   240 5% 5%;
+  --color-surface:      240 7% 9%;
+  --color-surfaceHover: 240 8% 12%;
+  --color-border:       240 8% 17%;
+  --color-muted:        240 5% 60%;
+  --color-text:         240 4% 92%;
+  --color-shadow:       0 0% 0%;
+  --color-accent-text:  0 0% 100%;
+}
+
+/* Light */
+[data-theme="light"] {
+  --color-background:   240 12% 98%;
+  --color-surface:      0 0% 100%;
+  --color-surfaceHover: 240 12% 96%;
+  --color-border:       240 8% 88%;
+  --color-muted:        240 4% 42%;
+  --color-text:         240 16% 12%;
+  --color-shadow:       240 10% 10%;
+  --color-accent-text:  0 0% 100%;
+}
+
+/* Default accent (overridden by JS based on settings) */
+:root { --color-accent: 220 90% 65%; }
+
+/* Font size scale */
+:root                       { font-size: 16px; }
+[data-font-size="sm"]       { font-size: 14px; }
+[data-font-size="md"]       { font-size: 16px; }
+[data-font-size="lg"]       { font-size: 17.5px; }
+
+/* ============================================================
+   Base
+   ============================================================ */
+
+html, body {
+  background-color: hsl(var(--color-background));
+  color: hsl(var(--color-text));
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  /* Hairline default ring color matches border */
+  --tw-ring-color: hsl(var(--color-border));
+}
+
+/* Native form controls inherit fonts */
+input, button, select, textarea { font: inherit; color: inherit; }
+
+/* Date input picker indicator — invert in dark for legibility */
+[data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.8);
+  cursor: pointer;
+  opacity: 0.7;
+}
+[data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}
+
+/* ============================================================
+   Scrollbar
+   ============================================================ */
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--color-border));
+  border-radius: 6px;
+  border: 2px solid hsl(var(--color-background));
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--color-muted) / 0.5);
+}
+
+/* ============================================================
+   Smooth theme transitions (subtle)
+   ============================================================ */
+html { transition: color 200ms ease, background-color 200ms ease; }
