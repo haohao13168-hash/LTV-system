@@ -16,6 +16,7 @@ export default function CompanyFormModal({ open, onClose, mode = "add", company 
   const [name, setName] = useState("");
   const [startAt, setStartAt] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -39,8 +40,6 @@ export default function CompanyFormModal({ open, onClose, mode = "add", company 
   }, [open, onClose]);
 
   if (!open) return null;
-
-  const [saving, setSaving] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
