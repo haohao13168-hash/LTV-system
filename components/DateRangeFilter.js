@@ -27,6 +27,16 @@ function shiftBackMonths(months) {
   d.setMonth(d.getMonth() - months);
   return d.toISOString().slice(0, 10);
 }
+function shiftForwardDays(fromStr, days) {
+  const d = new Date(fromStr);
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+function shiftForwardMonths(fromStr, months) {
+  const d = new Date(fromStr);
+  d.setMonth(d.getMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
 
 // id → translation key (in i18n.js)
 const GRANULARITY_OPTIONS = [
@@ -40,7 +50,22 @@ const GRANULARITY_OPTIONS = [
   { id: "custom",   labelKey: "custom" },
 ];
 
-function applyGranularity(id) {
+// If a From date is already set, granularity buttons anchor forward
+// from that date (e.g. From + 1 year). Otherwise they anchor backward
+// from today (e.g. today - 1 year).
+function applyGranularity(id, currentFrom) {
+  if (currentFrom) {
+    switch (id) {
+      case "daily":    return { from: currentFrom, to: currentFrom };
+      case "weekly":   return { from: currentFrom, to: shiftForwardDays(currentFrom, 6) };
+      case "monthly":  return { from: currentFrom, to: shiftForwardMonths(currentFrom, 1) };
+      case "3months":  return { from: currentFrom, to: shiftForwardMonths(currentFrom, 3) };
+      case "6months":  return { from: currentFrom, to: shiftForwardMonths(currentFrom, 6) };
+      case "9months":  return { from: currentFrom, to: shiftForwardMonths(currentFrom, 9) };
+      case "1year":    return { from: currentFrom, to: shiftForwardMonths(currentFrom, 12) };
+      default:         return { from: "", to: "" };
+    }
+  }
   switch (id) {
     case "daily":    return { from: todayStr(),         to: todayStr() };
     case "weekly":   return { from: shiftBackDays(6),   to: todayStr() };
@@ -56,14 +81,26 @@ function applyGranularity(id) {
 function detectGranularity(from, to) {
   if (!from && !to) return null;
   if (!from || !to) return "custom";
-  if (to !== todayStr()) return "custom";
-  if (from === todayStr())         return "daily";
-  if (from === shiftBackDays(6))   return "weekly";
-  if (from === shiftBackMonths(1)) return "monthly";
-  if (from === shiftBackMonths(3)) return "3months";
-  if (from === shiftBackMonths(6)) return "6months";
-  if (from === shiftBackMonths(9)) return "9months";
-  if (from === shiftBackMonths(12))return "1year";
+
+  // Forward-anchored: From..From+N
+  if (from === to) return "daily";
+  if (to === shiftForwardDays(from, 6))   return "weekly";
+  if (to === shiftForwardMonths(from, 1)) return "monthly";
+  if (to === shiftForwardMonths(from, 3)) return "3months";
+  if (to === shiftForwardMonths(from, 6)) return "6months";
+  if (to === shiftForwardMonths(from, 9)) return "9months";
+  if (to === shiftForwardMonths(from, 12)) return "1year";
+
+  // Backward-anchored from today: today-N..today
+  if (to === todayStr()) {
+    if (from === todayStr())          return "daily";
+    if (from === shiftBackDays(6))    return "weekly";
+    if (from === shiftBackMonths(1))  return "monthly";
+    if (from === shiftBackMonths(3))  return "3months";
+    if (from === shiftBackMonths(6))  return "6months";
+    if (from === shiftBackMonths(9))  return "9months";
+    if (from === shiftBackMonths(12)) return "1year";
+  }
   return "custom";
 }
 
@@ -91,7 +128,7 @@ export default function DateRangeFilter({ value, onChange }) {
     };
   }, [open]);
 
-  const pickGranularity = (id) => onChange(applyGranularity(id));
+  const pickGranularity = (id) => onChange(applyGranularity(id, from));
   const clear = () => onChange({ from: "", to: "" });
 
   // Trigger label

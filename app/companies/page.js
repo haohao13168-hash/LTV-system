@@ -91,7 +91,7 @@ function CompanyInlinePanel({ company }) {
 
 export default function CompaniesPage() {
   const { t } = useI18n();
-  const { companies, deleteCompany, getReceivedStats } = useStore();
+  const { companies, deleteCompany, getReceivedStats, updateCompany } = useStore();
   const { currentUser } = useAuth();
   const canEdit = can(currentUser, "editData");
 
@@ -200,7 +200,19 @@ export default function CompaniesPage() {
                         <td className="px-3 py-3 text-right tabular-nums">{fmtMoney(s.deposit)}</td>
                         <td className="px-3 py-3 text-right tabular-nums">{fmtMoney(s.withdraw)}</td>
                         <td className="px-3 py-3 text-right tabular-nums text-text">{fmtMoney(s.net)}</td>
-                        <td className="px-3 py-3 text-muted tabular-nums">{c.createdAt}</td>
+                        <td className="px-3 py-3">
+                          {canEdit ? (
+                            <input
+                              type="date"
+                              value={c.createdAt || ""}
+                              onChange={(e) => updateCompany(c.id, { createdAt: e.target.value })}
+                              className="px-2 py-1 text-xs bg-background border border-border rounded text-text tabular-nums focus:outline-none focus:border-accent/60 cursor-pointer"
+                              title={t("startOn")}
+                            />
+                          ) : (
+                            <span className="text-muted tabular-nums">{c.createdAt}</span>
+                          )}
+                        </td>
                         <td className="pl-3 pr-5 py-3">
                           <div className="flex items-center justify-end gap-1">
                             <Link

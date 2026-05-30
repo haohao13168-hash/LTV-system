@@ -101,9 +101,6 @@ export default function CompanyDetailPage() {
           <CompanyAvatar company={company} size="lg" />
           <div>
             <h1 className="text-xl font-semibold text-text">{company.name}</h1>
-            <p className="text-xs text-muted mt-0.5">
-              {t("startOn")}: <span className="tabular-nums">{company.createdAt}</span>
-            </p>
             <p className="text-xs text-muted mt-0.5">{t("receivedHint")}</p>
           </div>
         </div>
