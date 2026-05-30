@@ -44,7 +44,7 @@ export default function CompanyDetailPage() {
   const { t } = useI18n();
   const router = useRouter();
   const params = useParams();
-  const { companies, loading, getCompany, deleteCompany, getReceivedStats } = useStore();
+  const { companies, loading, getCompany, deleteCompany, getReceivedStats, getCompanyStats } = useStore();
   const { currentUser } = useAuth();
   const canEdit = can(currentUser, "editData");
 
@@ -165,13 +165,18 @@ export default function CompanyDetailPage() {
                       <th className="px-5 py-3 font-medium text-right">{t("members")}</th>
                       <th className="px-5 py-3 font-medium text-right">{t("deposit")}</th>
                       <th className="px-5 py-3 font-medium text-right">{t("withdraw")}</th>
+                      <th className="px-5 py-3 font-medium text-right">{t("net")}</th>
+                      <th className="px-5 py-3 font-medium text-right">{t("valuePerMember")}</th>
                       <th className="px-5 py-3 font-medium">{t("startOn")}</th>
                       <th className="px-5 py-3 font-medium w-8"></th>
                     </tr>
                   </thead>
                   <tbody>
                     {otherCompanies.map((o) => {
-                      const os = getReceivedStats(o, dateRange);
+                      // Each row = THAT company's own contribution to this main company
+                      // (sum of its own daily entries within the date range)
+                      const os = getCompanyStats(o, dateRange);
+                      const oPerMember = os.members > 0 ? os.net / os.members : 0;
                       return (
                         <tr key={o.id} className="border-b border-border last:border-0 hover:bg-surfaceHover/40 group">
                           <td className="px-5 py-3">
@@ -183,6 +188,8 @@ export default function CompanyDetailPage() {
                           <td className="px-5 py-3 text-right tabular-nums">{fmtNum(os.members)}</td>
                           <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(os.deposit)}</td>
                           <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(os.withdraw)}</td>
+                          <td className="px-5 py-3 text-right tabular-nums text-text">{fmtMoney(os.net)}</td>
+                          <td className="px-5 py-3 text-right tabular-nums">{fmtPerMember(oPerMember)}</td>
                           <td className="px-5 py-3 text-muted tabular-nums">{o.createdAt}</td>
                           <td className="px-5 py-3 text-right">
                             <Link href={`/companies/${o.id}`}
