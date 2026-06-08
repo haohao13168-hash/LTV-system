@@ -55,8 +55,8 @@ const INLINE_TINTS = {
 
 function CompanyInlinePanel({ company }) {
   const { t } = useI18n();
-  const { getReceivedStats } = useStore();
-  const s = getReceivedStats(company);
+  const { getCompanyStats } = useStore();
+  const s = getCompanyStats(company);
   const perMember = s.members > 0 ? s.net / s.members : 0;
 
   const blocks = [
@@ -91,7 +91,7 @@ function CompanyInlinePanel({ company }) {
 
 export default function CompaniesPage() {
   const { t } = useI18n();
-  const { companies, deleteCompany, getReceivedStats, updateCompany } = useStore();
+  const { companies, deleteCompany, getCompanyStats, updateCompany } = useStore();
   const { currentUser } = useAuth();
   const canEdit = can(currentUser, "editData");
 
@@ -167,7 +167,7 @@ export default function CompaniesPage() {
               <tbody>
                 {companies.map((c) => {
                   const isOpen = expanded.has(c.id);
-                  const s = getReceivedStats(c);
+                  const s = getCompanyStats(c);
                   return (
                     <Fragment key={c.id}>
                       <tr

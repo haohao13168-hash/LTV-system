@@ -13,6 +13,7 @@ import DateRangeFilter from "@/components/DateRangeFilter";
 import CompanyAvatar from "@/components/CompanyAvatar";
 import DailyEntryTable from "@/components/DailyEntryTable";
 import ViewModeToggle from "@/components/ViewModeToggle";
+import BcbSyncButton from "@/components/BcbSyncButton";
 import {
   IconArrowLeft,
   IconUsers,
@@ -45,6 +46,9 @@ export default function CompanyDetailPage() {
   const router = useRouter();
   const params = useParams();
   const { companies, loading, getCompany, deleteCompany, getReceivedStats, getCompanyStats } = useStore();
+  // For BCB wallet-linked companies, top cards show OWN data (V12MY shows V12MY's
+  // own depositors, BCB shows sum of all 6 platforms). For manual / daily-entry
+  // companies, keep the legacy "sum of others' contributions" behavior.
   const { currentUser } = useAuth();
   const canEdit = can(currentUser, "editData");
 
@@ -79,8 +83,13 @@ export default function CompanyDetailPage() {
     );
   }
 
-  // Aggregated stats — sum of OTHER companies' daily entries within range
-  const received = getReceivedStats(company, dateRange);
+  // Pick which stats to show in the top cards:
+  // - Wallet-linked company → its OWN BCB data (BCB shows total, platforms show own)
+  // - Other companies → sum-of-others (legacy behavior)
+  const isWalletLinked = !!company.walletSource;
+  const received = isWalletLinked
+    ? getCompanyStats(company, dateRange)
+    : getReceivedStats(company, dateRange);
   const perMember = received.members > 0 ? received.net / received.members : 0;
   const otherCompanies = companies.filter((c) => c.id !== company.id);
 
@@ -124,10 +133,13 @@ export default function CompanyDetailPage() {
         )}
       </div>
 
-      {/* Toolbar: view toggle (left) + date range (right) */}
+      {/* Toolbar: view toggle (left) + BCB sync + date range (right) */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <ViewModeToggle value={viewMode} onChange={setViewMode} />
-        <DateRangeFilter value={dateRange} onChange={setDateRange} />
+        <div className="flex items-center gap-3">
+          {isWalletLinked && <BcbSyncButton />}
+          <DateRangeFilter value={dateRange} onChange={setDateRange} />
+        </div>
       </div>
 
       {viewMode === "summary" ? (

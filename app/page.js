@@ -5,6 +5,7 @@ import { useI18n } from "@/lib/i18n";
 import { useStore } from "@/lib/store";
 import StatCard from "@/components/StatCard";
 import DateRangeFilter from "@/components/DateRangeFilter";
+import BcbSyncButton from "@/components/BcbSyncButton";
 import { IconUsers, IconArrowDown, IconWallet, IconSparkle } from "@/components/Icon";
 
 function fmtNum(n) {
@@ -30,13 +31,21 @@ function IconDeposit({ className = "h-4 w-4" }) {
 
 export default function DashboardPage() {
   const { t } = useI18n();
-  const { companies, getReceivedStats } = useStore();
+  const { companies, getCompanyStats } = useStore();
 
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
 
+  // True if any company is wallet-linked → show the BCB refresh button in header
+  const anyWalletLinked = companies.some((c) => c.walletSource);
+
+  // Dashboard total = sum of "top-level" companies only.
+  // For BCB structure: include the BCB parent (walletSource='BCB_TOTAL') but skip
+  // the individual platforms, otherwise we'd double-count (BCB already aggregates
+  // V12MY + BVBX + …). Non-wallet companies are always included.
   const totals = companies.reduce(
     (acc, c) => {
-      const s = getReceivedStats(c, dateRange);
+      if (c.walletSource && c.walletSource !== "BCB_TOTAL") return acc;
+      const s = getCompanyStats(c, dateRange);
       return {
         members: acc.members + s.members,
         deposit: acc.deposit + s.deposit,
@@ -50,12 +59,15 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold text-text">{t("dashboardTitle")}</h1>
           <p className="text-sm text-muted mt-1">{t("dashboardSubtitle")}</p>
         </div>
-        <DateRangeFilter value={dateRange} onChange={setDateRange} />
+        <div className="flex items-center gap-3 flex-wrap">
+          {anyWalletLinked && <BcbSyncButton />}
+          <DateRangeFilter value={dateRange} onChange={setDateRange} />
+        </div>
       </div>
 
       {/* Stat cards (with themed icon tints) */}
@@ -89,7 +101,9 @@ export default function DashboardPage() {
             </thead>
             <tbody>
               {companies.map((c) => {
-                const s = getReceivedStats(c, dateRange);
+                // Each row = that company's own stats (wallet companies pull from BCB,
+                // manual companies sum their own daily entries).
+                const s = getCompanyStats(c, dateRange);
                 const perMember = s.members > 0 ? s.net / s.members : 0;
                 return (
                   <tr key={c.id} className="border-b border-border last:border-0">
