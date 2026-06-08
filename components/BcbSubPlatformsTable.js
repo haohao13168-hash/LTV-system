@@ -57,8 +57,7 @@ export default function BcbSubPlatformsTable({ platforms, onUpdateDate }) {
               {platforms.map((p) => {
                 const members = p.depositing_members || 0;
                 const deposit = Math.round(parseFloat(p.total_deposit) || 0);
-                // Withdraw not yet pulled — once we add it, replace this.
-                const withdraw = 0;
+                const withdraw = Math.round(parseFloat(p.total_withdraw) || 0);
                 const net = deposit - withdraw;
                 const perMember = members > 0 ? net / members : 0;
                 return (
