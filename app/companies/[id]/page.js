@@ -14,6 +14,7 @@ import CompanyAvatar from "@/components/CompanyAvatar";
 import DailyEntryTable from "@/components/DailyEntryTable";
 import ViewModeToggle from "@/components/ViewModeToggle";
 import BcbSyncButton from "@/components/BcbSyncButton";
+import BcbSubPlatformsTable from "@/components/BcbSubPlatformsTable";
 import {
   IconArrowLeft,
   IconUsers,
@@ -45,7 +46,11 @@ export default function CompanyDetailPage() {
   const { t } = useI18n();
   const router = useRouter();
   const params = useParams();
-  const { companies, loading, getCompany, deleteCompany, getReceivedStats, getCompanyStats } = useStore();
+  const {
+    companies, loading, getCompany, deleteCompany,
+    getReceivedStats, getCompanyStats,
+    bcbPlatforms, updateBcbPlatformDate,
+  } = useStore();
   // For BCB wallet-linked companies, top cards show OWN data (V12MY shows V12MY's
   // own depositors, BCB shows sum of all 6 platforms). For manual / daily-entry
   // companies, keep the legacy "sum of others' contributions" behavior.
@@ -83,11 +88,12 @@ export default function CompanyDetailPage() {
     );
   }
 
-  // Pick which stats to show in the top cards:
-  // - Wallet-linked company → its OWN BCB data (BCB shows total, platforms show own)
-  // - Other companies → sum-of-others (legacy behavior)
-  const isWalletLinked = !!company.walletSource;
-  const received = isWalletLinked
+  // BCB is the only wallet-linked company right now. Its top stats come from
+  // bcb_platforms (sum of the 6 sub-platforms inside BCB wallet). Non-BCB
+  // companies use the legacy "sum of others' contributions" view (will show 0
+  // until each one is bound to its own wallet later).
+  const isBcbParent = company.walletSource === "BCB_TOTAL";
+  const received = isBcbParent
     ? getCompanyStats(company, dateRange)
     : getReceivedStats(company, dateRange);
   const perMember = received.members > 0 ? received.net / received.members : 0;
@@ -137,7 +143,7 @@ export default function CompanyDetailPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <ViewModeToggle value={viewMode} onChange={setViewMode} />
         <div className="flex items-center gap-3">
-          {isWalletLinked && <BcbSyncButton />}
+          {isBcbParent && <BcbSyncButton />}
           <DateRangeFilter value={dateRange} onChange={setDateRange} />
         </div>
       </div>
@@ -159,64 +165,72 @@ export default function CompanyDetailPage() {
             />
           </div>
 
-          {/* Other Companies — each shows its own aggregated received within range */}
-          <div className="bg-surface border border-border rounded-lg overflow-hidden shadow-card">
-            <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-text">{t("otherCompanies")}</h2>
-              <span className="text-xs text-muted">{otherCompanies.length}</span>
-            </div>
-
-            {otherCompanies.length === 0 ? (
-              <div className="p-8 text-center text-sm text-muted">{t("noOtherCompanies")}</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-left text-xs uppercase tracking-wider text-muted border-b border-border">
-                      <th className="px-5 py-3 font-medium">{t("companyName")}</th>
-                      <th className="px-5 py-3 font-medium text-right">{t("members")}</th>
-                      <th className="px-5 py-3 font-medium text-right">{t("deposit")}</th>
-                      <th className="px-5 py-3 font-medium text-right">{t("withdraw")}</th>
-                      <th className="px-5 py-3 font-medium text-right">{t("net")}</th>
-                      <th className="px-5 py-3 font-medium text-right">{t("valuePerMember")}</th>
-                      <th className="px-5 py-3 font-medium">{t("startOn")}</th>
-                      <th className="px-5 py-3 font-medium w-8"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {otherCompanies.map((o) => {
-                      // Each row = THAT company's own contribution to this main company
-                      // (sum of its own daily entries within the date range)
-                      const os = getCompanyStats(o, dateRange);
-                      const oPerMember = os.members > 0 ? os.net / os.members : 0;
-                      return (
-                        <tr key={o.id} className="border-b border-border last:border-0 hover:bg-surfaceHover/40 group">
-                          <td className="px-5 py-3">
-                            <Link href={`/companies/${o.id}`} className="inline-flex items-center gap-2.5 group">
-                              <CompanyAvatar company={o} size="md" />
-                              <span className="text-text group-hover:text-accent transition-colors">{o.name}</span>
-                            </Link>
-                          </td>
-                          <td className="px-5 py-3 text-right tabular-nums">{fmtNum(os.members)}</td>
-                          <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(os.deposit)}</td>
-                          <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(os.withdraw)}</td>
-                          <td className="px-5 py-3 text-right tabular-nums text-text">{fmtMoney(os.net)}</td>
-                          <td className="px-5 py-3 text-right tabular-nums">{fmtPerMember(oPerMember)}</td>
-                          <td className="px-5 py-3 text-muted tabular-nums">{o.createdAt}</td>
-                          <td className="px-5 py-3 text-right">
-                            <Link href={`/companies/${o.id}`}
-                              className="inline-flex text-muted hover:text-accent opacity-0 group-hover:opacity-100 transition-opacity">
-                              <IconChevronRight className="h-4 w-4" />
-                            </Link>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+          {/* Sub-platforms — for BCB, this is its wallet's 6 sub-platforms with
+              live data + editable start dates. For other companies, this is the
+              legacy "Other Companies" list (empty until each is bound). */}
+          {isBcbParent ? (
+            <BcbSubPlatformsTable
+              platforms={bcbPlatforms}
+              canEdit={canEdit}
+              onUpdateDate={updateBcbPlatformDate}
+            />
+          ) : (
+            <div className="bg-surface border border-border rounded-lg overflow-hidden shadow-card">
+              <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-text">{t("otherCompanies")}</h2>
+                <span className="text-xs text-muted">{otherCompanies.length}</span>
               </div>
-            )}
-          </div>
+
+              {otherCompanies.length === 0 ? (
+                <div className="p-8 text-center text-sm text-muted">{t("noOtherCompanies")}</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs uppercase tracking-wider text-muted border-b border-border">
+                        <th className="px-5 py-3 font-medium">{t("companyName")}</th>
+                        <th className="px-5 py-3 font-medium text-right">{t("members")}</th>
+                        <th className="px-5 py-3 font-medium text-right">{t("deposit")}</th>
+                        <th className="px-5 py-3 font-medium text-right">{t("withdraw")}</th>
+                        <th className="px-5 py-3 font-medium text-right">{t("net")}</th>
+                        <th className="px-5 py-3 font-medium text-right">{t("valuePerMember")}</th>
+                        <th className="px-5 py-3 font-medium">{t("startOn")}</th>
+                        <th className="px-5 py-3 font-medium w-8"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {otherCompanies.map((o) => {
+                        const os = getCompanyStats(o, dateRange);
+                        const oPerMember = os.members > 0 ? os.net / os.members : 0;
+                        return (
+                          <tr key={o.id} className="border-b border-border last:border-0 hover:bg-surfaceHover/40 group">
+                            <td className="px-5 py-3">
+                              <Link href={`/companies/${o.id}`} className="inline-flex items-center gap-2.5 group">
+                                <CompanyAvatar company={o} size="md" />
+                                <span className="text-text group-hover:text-accent transition-colors">{o.name}</span>
+                              </Link>
+                            </td>
+                            <td className="px-5 py-3 text-right tabular-nums">{fmtNum(os.members)}</td>
+                            <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(os.deposit)}</td>
+                            <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(os.withdraw)}</td>
+                            <td className="px-5 py-3 text-right tabular-nums text-text">{fmtMoney(os.net)}</td>
+                            <td className="px-5 py-3 text-right tabular-nums">{fmtPerMember(oPerMember)}</td>
+                            <td className="px-5 py-3 text-muted tabular-nums">{o.createdAt}</td>
+                            <td className="px-5 py-3 text-right">
+                              <Link href={`/companies/${o.id}`}
+                                className="inline-flex text-muted hover:text-accent opacity-0 group-hover:opacity-100 transition-opacity">
+                                <IconChevronRight className="h-4 w-4" />
+                              </Link>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </>
       ) : (
         <DailyEntryTable company={company} dateRange={dateRange} />
