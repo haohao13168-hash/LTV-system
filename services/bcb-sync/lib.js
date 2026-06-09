@@ -77,15 +77,18 @@ async function withConcurrency(items, fn, concurrency = 10) {
   return results;
 }
 
-// Lifetime WITHDRAW for one user — uses the `totalAmount` summary field on
-// /transactions/getAllTransactions, which is the per-user lifetime sum when
-// userId is set. Returns positive number (BCB API returns negative for withdraw).
+// Lifetime WITHDRAW for one user. The transactions endpoint seems to have
+// an implicit date filter, so we explicitly pass a very wide sDate / eDate
+// to get the user's full history. Returns positive number (BCB returns
+// negative for withdraws).
 async function getUserLifetimeWithdraw(userId) {
   try {
     const r = await bcb("/transactions/getAllTransactions", {
       userId: String(userId),
       type: "WITHDRAW",
       status: "COMPLETED",
+      sDate: "2020-01-01",
+      eDate: "2030-12-31",
       pageIndex: 1,
     });
     if (r.status !== "SUCCESS") return 0;
