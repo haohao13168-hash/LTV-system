@@ -3,7 +3,13 @@
 // Also auto-syncs every SYNC_INTERVAL_MIN minutes (default 10).
 
 const http = require("http");
-const { runSync, runRangeSyncCached, preComputeCommonRanges } = require("./lib");
+const {
+  runSync,
+  runRangeSyncCached,
+  preComputeCommonRanges,
+  startRangeJob,
+  getJob,
+} = require("./lib");
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const SYNC_INTERVAL_MIN = parseInt(process.env.SYNC_INTERVAL_MIN || "10", 10);
@@ -104,7 +110,49 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  return send(404, { error: "Not Found", availableEndpoints: ["GET /health", "POST /sync", "POST /range"] });
+  // POST /range/start — kick off a range job, returns jobId immediately
+  if (req.method === "POST" && req.url === "/range/start") {
+    const auth = req.headers["x-api-key"];
+    if (auth !== SYNC_API_KEY) return send(401, { error: "Unauthorized" });
+
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    let parsed;
+    try { parsed = JSON.parse(body); }
+    catch { return send(400, { error: "Body must be JSON" }); }
+
+    const { from, to } = parsed || {};
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (!from || !to || !dateRe.test(from) || !dateRe.test(to)) {
+      return send(400, { error: "Need `from` and `to` as YYYY-MM-DD" });
+    }
+    try {
+      const jobId = startRangeJob(from, to);
+      const job = getJob(jobId);
+      return send(202, { jobId, status: job.status, from, to });
+    } catch (e) {
+      return send(500, { error: e.message });
+    }
+  }
+
+  // GET /range/status?id=X — poll job status (fast, no long wait)
+  if (req.method === "GET" && req.url.startsWith("/range/status")) {
+    const auth = req.headers["x-api-key"];
+    if (auth !== SYNC_API_KEY) return send(401, { error: "Unauthorized" });
+
+    const u = new URL(req.url, "http://x");
+    const jobId = u.searchParams.get("id");
+    if (!jobId) return send(400, { error: "Need ?id=jobId" });
+
+    const job = getJob(jobId);
+    if (!job) return send(404, { error: "Job not found (may have expired)" });
+    return send(200, job);
+  }
+
+  return send(404, {
+    error: "Not Found",
+    availableEndpoints: ["GET /health", "POST /sync", "POST /range", "POST /range/start", "GET /range/status?id=X"]
+  });
 });
 
 server.listen(PORT, () => {

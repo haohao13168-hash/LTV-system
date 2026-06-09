@@ -40,7 +40,6 @@ function shiftForwardMonths(fromStr, months) {
 
 // id → translation key (in i18n.js)
 const GRANULARITY_OPTIONS = [
-  { id: "daily",    labelKey: "daily" },
   { id: "weekly",   labelKey: "weekly" },
   { id: "monthly",  labelKey: "monthly" },
   { id: "3months",  labelKey: "last3Months" },
@@ -83,7 +82,6 @@ function detectGranularity(from, to) {
   if (!from || !to) return "custom";
 
   // Forward-anchored: From..From+N
-  if (from === to) return "daily";
   if (to === shiftForwardDays(from, 6))   return "weekly";
   if (to === shiftForwardMonths(from, 1)) return "monthly";
   if (to === shiftForwardMonths(from, 3)) return "3months";
@@ -93,7 +91,6 @@ function detectGranularity(from, to) {
 
   // Backward-anchored from today: today-N..today
   if (to === todayStr()) {
-    if (from === todayStr())          return "daily";
     if (from === shiftBackDays(6))    return "weekly";
     if (from === shiftBackMonths(1))  return "monthly";
     if (from === shiftBackMonths(3))  return "3months";
@@ -104,13 +101,24 @@ function detectGranularity(from, to) {
   return "custom";
 }
 
-export default function DateRangeFilter({ value, onChange }) {
+// `onSubmit` is optional. When provided, dropdown stays open after picking
+// dates and the user has to click Apply to commit. When omitted, every
+// granularity/date change fires onChange immediately (legacy behaviour).
+export default function DateRangeFilter({ value, onChange, onSubmit, submitLabel, submitting = false }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
-  const from = value?.from || "";
-  const to   = value?.to   || "";
+  // When stagedMode is on, we hold local state for the dates and only emit
+  // through onChange when the user clicks Apply. Otherwise pass through.
+  const stagedMode = !!onSubmit;
+  const [staged, setStaged] = useState({ from: value?.from || "", to: value?.to || "" });
+  useEffect(() => {
+    if (stagedMode) setStaged({ from: value?.from || "", to: value?.to || "" });
+  }, [stagedMode, value?.from, value?.to]);
+
+  const from = stagedMode ? staged.from : (value?.from || "");
+  const to   = stagedMode ? staged.to   : (value?.to   || "");
   const days = daysBetween(from, to);
   const granularity = detectGranularity(from, to);
 
@@ -128,8 +136,20 @@ export default function DateRangeFilter({ value, onChange }) {
     };
   }, [open]);
 
-  const pickGranularity = (id) => onChange(applyGranularity(id, from));
-  const clear = () => onChange({ from: "", to: "" });
+  const emit = (next) => {
+    if (stagedMode) setStaged(next);
+    else onChange(next);
+  };
+  const pickGranularity = (id) => emit(applyGranularity(id, from));
+  const clear = () => {
+    emit({ from: "", to: "" });
+    if (stagedMode) onChange({ from: "", to: "" }); // clear immediately commits
+  };
+  const applyStaged = () => {
+    onChange(staged);
+    if (onSubmit) onSubmit(staged);
+    setOpen(false);
+  };
 
   // Trigger label
   const labelKey = GRANULARITY_OPTIONS.find((o) => o.id === granularity)?.labelKey;
@@ -195,7 +215,7 @@ export default function DateRangeFilter({ value, onChange }) {
               <input
                 type="date"
                 value={from}
-                onChange={(e) => onChange({ from: e.target.value, to })}
+                onChange={(e) => emit({ from: e.target.value, to })}
                 className="w-full px-2 py-1.5 text-xs bg-background border border-border rounded text-text focus:outline-none focus:border-accent/60"
               />
             </div>
@@ -204,11 +224,24 @@ export default function DateRangeFilter({ value, onChange }) {
               <input
                 type="date"
                 value={to}
-                onChange={(e) => onChange({ from, to: e.target.value })}
+                onChange={(e) => emit({ from, to: e.target.value })}
                 className="w-full px-2 py-1.5 text-xs bg-background border border-border rounded text-text focus:outline-none focus:border-accent/60"
               />
             </div>
           </div>
+
+          {stagedMode && (
+            <div className="mt-3 pt-3 border-t border-border">
+              <button
+                type="button"
+                onClick={applyStaged}
+                disabled={submitting || !from || !to}
+                className="w-full px-3 py-2 text-xs font-medium rounded-md bg-accent text-accentText hover:bg-accent/90 transition-colors disabled:opacity-60 disabled:cursor-wait"
+              >
+                {submitting ? "Loading…" : (submitLabel || "Apply")}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

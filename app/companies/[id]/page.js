@@ -65,35 +65,47 @@ export default function CompanyDetailPage() {
   const [viewMode, setViewMode] = useState("summary"); // "summary" | "daily"
 
   // ─── BCB date range query ──────────────────────────────────────
-  // When user picks a date range on a BCB-linked company, fire an on-demand
-  // query to the droplet for fresh per-day data. Results are not stored —
-  // each range pick triggers a new fetch (~30-60s).
-  const [bcbRange, setBcbRange] = useState(null);    // { platforms, total } or null
+  // The range fetch only fires when the user clicks Apply in the date
+  // filter (not on every date input change). The droplet runs it as an
+  // async job; we poll every 3s for status.
+  const [bcbRange, setBcbRange] = useState(null);
   const [bcbRangeLoading, setBcbRangeLoading] = useState(false);
   const [bcbRangeError, setBcbRangeError] = useState(null);
+  const [bcbRangeElapsedMs, setBcbRangeElapsedMs] = useState(0);
 
   const company = getCompany(params.id);
   const isBcbParent = company?.walletSource === "BCB_TOTAL";
   const hasDateRange = !!(dateRange.from && dateRange.to);
 
-  useEffect(() => {
-    if (!isBcbParent || !hasDateRange) {
+  // Triggered by DateRangeFilter's Submit button. Clears any old result
+  // and runs a fresh range fetch with progress updates.
+  const runBcbRangeQuery = async (range) => {
+    if (!range?.from || !range?.to) {
       setBcbRange(null);
       setBcbRangeError(null);
+      setBcbRangeElapsedMs(0);
       return;
     }
-    let cancelled = false;
-    setBcbRangeLoading(true);
+    setBcbRange(null);
     setBcbRangeError(null);
-    fetchBcbRange(dateRange.from, dateRange.to).then((r) => {
-      if (cancelled) return;
-      if (r?.error) setBcbRangeError(r.error);
-      else setBcbRange(r);
-      setBcbRangeLoading(false);
+    setBcbRangeElapsedMs(0);
+    setBcbRangeLoading(true);
+    const r = await fetchBcbRange(range.from, range.to, ({ elapsedMs }) => {
+      setBcbRangeElapsedMs(elapsedMs);
     });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isBcbParent, dateRange.from, dateRange.to]);
+    if (r?.error) setBcbRangeError(r.error);
+    else setBcbRange(r);
+    setBcbRangeLoading(false);
+  };
+
+  // Clearing the date range also clears the range result
+  useEffect(() => {
+    if (!hasDateRange) {
+      setBcbRange(null);
+      setBcbRangeError(null);
+      setBcbRangeElapsedMs(0);
+    }
+  }, [hasDateRange]);
 
   // (state hooks above must run unconditionally; the early return only happens
   // after all hooks have been declared)
@@ -198,12 +210,18 @@ export default function CompanyDetailPage() {
         <ViewModeToggle value={viewMode} onChange={setViewMode} />
         <div className="flex items-center gap-3">
           {isBcbParent && <BcbSyncButton />}
-          <DateRangeFilter value={dateRange} onChange={setDateRange} />
+          <DateRangeFilter
+            value={dateRange}
+            onChange={setDateRange}
+            onSubmit={isBcbParent ? runBcbRangeQuery : undefined}
+            submitting={bcbRangeLoading}
+            submitLabel="Apply date filter"
+          />
         </div>
       </div>
 
-      {/* BCB date range loading / error banner */}
-      {isBcbParent && hasDateRange && (
+      {/* BCB date range loading / error / success banner */}
+      {isBcbParent && hasDateRange && (bcbRangeLoading || bcbRangeError || bcbRange) && (
         <div className={`px-4 py-2.5 rounded-md text-sm flex items-center gap-2 ${
           bcbRangeError
             ? "bg-rose-500/10 border border-rose-500/30 text-rose-300"
@@ -216,14 +234,23 @@ export default function CompanyDetailPage() {
               <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M21 12a9 9 0 1 1-6.219-8.56" />
               </svg>
-              <span>Loading data for {dateRange.from} → {dateRange.to}… (~30-60s)</span>
+              <span>
+                Loading data for {dateRange.from} → {dateRange.to}…
+                {bcbRangeElapsedMs > 0 && (
+                  <span className="text-muted"> · {(bcbRangeElapsedMs / 1000).toFixed(0)}s elapsed</span>
+                )}
+              </span>
             </>
           )}
           {bcbRangeError && <span>Range query failed: {bcbRangeError}</span>}
           {!bcbRangeLoading && !bcbRangeError && bcbRange && (
             <span>
               ✓ Showing {dateRange.from} → {dateRange.to}
-              <span className="text-muted"> · pulled in {(bcbRange.duration_ms / 1000).toFixed(1)}s</span>
+              <span className="text-muted">
+                {" · pulled in "}
+                {((bcbRange.duration_ms || 0) / 1000).toFixed(1)}s
+                {bcbRange.fromCache && " (from cache)"}
+              </span>
             </span>
           )}
         </div>

@@ -313,6 +313,55 @@ async function runSync(trigger = "manual") {
   }
 }
 
+// ─── Async job state ──────────────────────────────────────────
+// In-memory job tracking so the dashboard can fire-and-poll instead of
+// waiting on a 2-3 min HTTP request (which would hit Vercel's 10s timeout).
+const { randomUUID } = require("crypto");
+const jobs = new Map(); // jobId → { status, result, error, startedAt, finishedAt }
+const JOB_TTL_MS = 60 * 60 * 1000; // keep finished jobs around for 1h
+
+function createRangeJob(from, to) {
+  const jobId = randomUUID();
+  jobs.set(jobId, {
+    status: "running", from, to,
+    startedAt: Date.now(), finishedAt: null,
+    result: null, error: null,
+  });
+  return jobId;
+}
+
+function getJob(jobId) {
+  const j = jobs.get(jobId);
+  if (!j) return null;
+  return {
+    status: j.status,
+    from: j.from,
+    to: j.to,
+    startedAt: j.startedAt,
+    finishedAt: j.finishedAt,
+    elapsed_ms: (j.finishedAt || Date.now()) - j.startedAt,
+    result: j.status === "done" ? j.result : null,
+    error: j.error,
+  };
+}
+
+function finishJob(jobId, { result = null, error = null } = {}) {
+  const j = jobs.get(jobId);
+  if (!j) return;
+  j.status = error ? "error" : "done";
+  j.result = result;
+  j.error = error?.message || (typeof error === "string" ? error : null);
+  j.finishedAt = Date.now();
+}
+
+// Garbage-collect finished jobs older than TTL so the Map doesn't grow.
+setInterval(() => {
+  const cutoff = Date.now() - JOB_TTL_MS;
+  for (const [id, j] of jobs.entries()) {
+    if (j.finishedAt && j.finishedAt < cutoff) jobs.delete(id);
+  }
+}, 5 * 60 * 1000);
+
 // ─── Range result cache ───────────────────────────────────────
 // In-memory cache keyed by "from|to". 15-min TTL so a recently-pulled
 // range comes back instantly. Cron pre-computes common ranges below.
@@ -449,10 +498,33 @@ async function preComputeCommonRanges() {
   return results;
 }
 
+// Start a range job asynchronously. Returns jobId immediately.
+// The actual work runs in the background; poll getJob(jobId) for progress.
+function startRangeJob(from, to) {
+  // If a fresh cached result exists, return it instantly without a real job
+  const cached = getCachedRange(from, to);
+  if (cached) {
+    const jobId = randomUUID();
+    jobs.set(jobId, {
+      status: "done", from, to,
+      startedAt: Date.now(), finishedAt: Date.now(),
+      result: cached, error: null,
+    });
+    return jobId;
+  }
+  const jobId = createRangeJob(from, to);
+  runRangeSyncCached(from, to)
+    .then((result) => finishJob(jobId, { result }))
+    .catch((error) => finishJob(jobId, { error }));
+  return jobId;
+}
+
 module.exports = {
   runSync,
   runRangeSync,
   runRangeSyncCached,
   preComputeCommonRanges,
+  startRangeJob,
+  getJob,
   bcb,
 };
