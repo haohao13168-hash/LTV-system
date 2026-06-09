@@ -77,18 +77,21 @@ async function withConcurrency(items, fn, concurrency = 10) {
   return results;
 }
 
-// Lifetime WITHDRAW for one user. The transactions endpoint seems to have
-// an implicit date filter, so we explicitly pass a very wide sDate / eDate
-// to get the user's full history. Returns positive number (BCB returns
-// negative for withdraws).
+// Lifetime WITHDRAW for one user. BCB's documented date format is
+// "YYYY-MM-DD HH:MM:SS" (with a space, NOT ISO with T). Without these
+// params the API only returns a short recent window. The 31-day max
+// applies merchant-wide but NOT to per-user queries.
+const WIDE_S_DATE = "2020-01-01 00:00:00";
+const WIDE_E_DATE = "2099-12-31 23:59:59";
+
 async function getUserLifetimeWithdraw(userId) {
   try {
     const r = await bcb("/transactions/getAllTransactions", {
       userId: String(userId),
       type: "WITHDRAW",
       status: "COMPLETED",
-      sDate: "2020-01-01",
-      eDate: "2030-12-31",
+      sDate: WIDE_S_DATE,
+      eDate: WIDE_E_DATE,
       pageIndex: 1,
     });
     if (r.status !== "SUCCESS") return 0;
