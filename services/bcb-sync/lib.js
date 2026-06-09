@@ -39,9 +39,17 @@ const ENDPOINT = `${BCB_API_BASE_URL.replace(/\/$/, "")}/api/v1/index.php`;
 
 // ─── Tunables ──────────────────────────────────────────────────
 const PER_USER_CONCURRENCY = 40;          // per-platform concurrent API calls
-const USER_CACHE_TTL_MS = 15 * 60 * 1000; // cached user lists usable for 15 min
+const USER_CACHE_TTL_MS = 60 * 60 * 1000; // cached user lists usable for 1 hour
 const WIDE_S_DATE = "2020-01-01 00:00:00";
 const WIDE_E_DATE = "2099-12-31 23:59:59";
+
+// Global flag — true while ANY range job is actively running. Cron-driven
+// lifetime sync checks this and skips its turn rather than competing for
+// BCB API quota.
+let rangeJobsRunning = 0;
+function incrementRangeJobs() { rangeJobsRunning++; }
+function decrementRangeJobs() { rangeJobsRunning = Math.max(0, rangeJobsRunning - 1); }
+function isRangeJobRunning() { return rangeJobsRunning > 0; }
 
 // ─── BCB API call ──────────────────────────────────────────────
 async function bcb(module, extras = {}) {
@@ -149,7 +157,10 @@ async function getCachedUsers(platform, { forceRefresh = false } = {}) {
 
 // ─── Lifetime pull: deposit from user.lifetimeDeposit (fast), withdraw per-user ──
 async function pullPlatformLifetime(platform) {
-  const allUsers = await getCachedUsers(platform, { forceRefresh: true });
+  // Use cached user list if fresh (up to 1h old) — saves ~60-90s per sync
+  // by skipping the ~465-page user fetch. Cron runs every 10 min so users
+  // get refreshed naturally every 6th run.
+  const allUsers = await getCachedUsers(platform);
 
   // Deposit: free from getAllUsers response
   const depositors = allUsers.filter((u) => parseFloat(u.lifetimeDeposit) > 0);
@@ -519,9 +530,11 @@ function startRangeJob(from, to) {
     return jobId;
   }
   const jobId = createRangeJob(from, to);
+  incrementRangeJobs();
   runRangeSyncCached(from, to)
     .then((result) => finishJob(jobId, { result }))
-    .catch((error) => finishJob(jobId, { error }));
+    .catch((error) => finishJob(jobId, { error }))
+    .finally(() => decrementRangeJobs());
   return jobId;
 }
 
@@ -532,5 +545,6 @@ module.exports = {
   preComputeCommonRanges,
   startRangeJob,
   getJob,
+  isRangeJobRunning,
   bcb,
 };

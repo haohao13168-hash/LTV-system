@@ -9,6 +9,7 @@ const {
   preComputeCommonRanges,
   startRangeJob,
   getJob,
+  isRangeJobRunning,
 } = require("./lib");
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -172,6 +173,11 @@ setInterval(() => {
     console.log("Skipping scheduled sync — previous still running");
     return;
   }
+  // Yield to user-initiated range jobs — they're more time-sensitive.
+  if (isRangeJobRunning()) {
+    console.log("Skipping scheduled sync — range job(s) active");
+    return;
+  }
   safeRunSync("cron").catch((e) =>
     console.error("Cron sync failed:", e.message)
   );
@@ -184,8 +190,8 @@ let preComputeInProgress = false;
 const PRECOMPUTE_INTERVAL_MIN = 30;
 
 async function runPreCompute() {
-  if (preComputeInProgress || syncInProgress) {
-    console.log("Skipping pre-compute — sync still running");
+  if (preComputeInProgress || syncInProgress || isRangeJobRunning()) {
+    console.log("Skipping pre-compute — other work in progress");
     return;
   }
   preComputeInProgress = true;
