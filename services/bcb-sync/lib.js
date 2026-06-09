@@ -313,6 +313,63 @@ async function runSync(trigger = "manual") {
   }
 }
 
+// ─── Range result cache ───────────────────────────────────────
+// In-memory cache keyed by "from|to". 15-min TTL so a recently-pulled
+// range comes back instantly. Cron pre-computes common ranges below.
+const RANGE_CACHE_TTL_MS = 15 * 60 * 1000;
+const rangeCache = new Map(); // "from|to" → { data, at }
+
+function getCachedRange(from, to) {
+  const k = `${from}|${to}`;
+  const c = rangeCache.get(k);
+  if (!c) return null;
+  if ((Date.now() - c.at) > RANGE_CACHE_TTL_MS) {
+    rangeCache.delete(k);
+    return null;
+  }
+  return { ...c.data, fromCache: true, cacheAgeMs: Date.now() - c.at };
+}
+
+function setCachedRange(from, to, data) {
+  rangeCache.set(`${from}|${to}`, { data, at: Date.now() });
+}
+
+// Compute common date ranges to pre-fetch in the background so user
+// clicks feel instant. All dates are YYYY-MM-DD in Malaysia timezone.
+function computeCommonRanges() {
+  const tz = "Asia/Kuala_Lumpur";
+  const todayMy = new Date().toLocaleDateString("en-CA", { timeZone: tz });
+  const d = new Date(todayMy + "T00:00:00+08:00");
+  const fmt = (date) => date.toISOString().slice(0, 10);
+  const addDays = (date, n) => {
+    const x = new Date(date);
+    x.setDate(x.getDate() + n);
+    return x;
+  };
+  const firstOfMonth = (date) => {
+    const x = new Date(date);
+    x.setDate(1);
+    return x;
+  };
+  const lastOfMonth = (date) => {
+    const x = firstOfMonth(date);
+    x.setMonth(x.getMonth() + 1);
+    x.setDate(0);
+    return x;
+  };
+  const thisMonthStart = firstOfMonth(d);
+  const lastMonthEnd = addDays(thisMonthStart, -1);
+  const lastMonthStart = firstOfMonth(lastMonthEnd);
+
+  return [
+    ["today",       fmt(d),                fmt(d)],
+    ["last7days",   fmt(addDays(d, -6)),   fmt(d)],
+    ["last30days",  fmt(addDays(d, -29)),  fmt(d)],
+    ["thisMonth",   fmt(thisMonthStart),   fmt(d)],
+    ["lastMonth",   fmt(lastMonthStart),   fmt(lastMonthEnd)],
+  ];
+}
+
 // ─── Range query — returns data without touching DB ────────────
 // Takes `from` and `to` as YYYY-MM-DD strings.
 async function runRangeSync(from, to) {
@@ -359,4 +416,43 @@ async function runRangeSync(from, to) {
   };
 }
 
-module.exports = { runSync, runRangeSync, bcb };
+// Cache-aware wrapper — checks cache first, falls back to runRangeSync.
+async function runRangeSyncCached(from, to) {
+  const cached = getCachedRange(from, to);
+  if (cached) {
+    console.log(`[${new Date().toISOString()}] Range cache HIT ${from}→${to} (age ${Math.round(cached.cacheAgeMs / 1000)}s)`);
+    return cached;
+  }
+  const fresh = await runRangeSync(from, to);
+  setCachedRange(from, to, fresh);
+  return { ...fresh, fromCache: false };
+}
+
+// Pre-compute the common ranges. Designed to be called from a cron.
+// Runs ranges sequentially so we don't overwhelm BCB API.
+async function preComputeCommonRanges() {
+  const ranges = computeCommonRanges();
+  console.log(`[${new Date().toISOString()}] Pre-computing ${ranges.length} ranges…`);
+  const results = [];
+  for (const [name, from, to] of ranges) {
+    try {
+      // Always recompute (don't use cache) so we get fresh data
+      const fresh = await runRangeSync(from, to);
+      setCachedRange(from, to, fresh);
+      results.push({ name, from, to, ok: true, duration_ms: fresh.duration_ms });
+      console.log(`  ✓ ${name} (${from}→${to}) — ${(fresh.duration_ms / 1000).toFixed(1)}s`);
+    } catch (e) {
+      results.push({ name, from, to, ok: false, error: e.message });
+      console.warn(`  ✗ ${name}: ${e.message}`);
+    }
+  }
+  return results;
+}
+
+module.exports = {
+  runSync,
+  runRangeSync,
+  runRangeSyncCached,
+  preComputeCommonRanges,
+  bcb,
+};

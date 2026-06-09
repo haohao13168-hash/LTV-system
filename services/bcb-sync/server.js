@@ -3,7 +3,7 @@
 // Also auto-syncs every SYNC_INTERVAL_MIN minutes (default 10).
 
 const http = require("http");
-const { runSync, runRangeSync } = require("./lib");
+const { runSync, runRangeSyncCached, preComputeCommonRanges } = require("./lib");
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const SYNC_INTERVAL_MIN = parseInt(process.env.SYNC_INTERVAL_MIN || "10", 10);
@@ -97,7 +97,7 @@ const server = http.createServer(async (req, res) => {
       return send(400, { error: "Need `from` and `to` as YYYY-MM-DD" });
     }
     try {
-      const result = await runRangeSync(from, to);
+      const result = await runRangeSyncCached(from, to);
       return send(200, result);
     } catch (e) {
       return send(500, { error: e.message });
@@ -128,6 +128,31 @@ setInterval(() => {
     console.error("Cron sync failed:", e.message)
   );
 }, SYNC_INTERVAL_MIN * 60 * 1000);
+
+// ─── Periodic pre-compute of common date ranges ────────────────
+// Runs every 30 min so the 5 common ranges (today / last 7d / last 30d /
+// this month / last month) feel instant when the user clicks them.
+let preComputeInProgress = false;
+const PRECOMPUTE_INTERVAL_MIN = 30;
+
+async function runPreCompute() {
+  if (preComputeInProgress || syncInProgress) {
+    console.log("Skipping pre-compute — sync still running");
+    return;
+  }
+  preComputeInProgress = true;
+  try {
+    await preComputeCommonRanges();
+  } catch (e) {
+    console.error("Pre-compute failed:", e.message);
+  } finally {
+    preComputeInProgress = false;
+  }
+}
+
+// Kick off first pre-compute after startup sync (~3 min in)
+setTimeout(() => runPreCompute(), 3 * 60 * 1000);
+setInterval(runPreCompute, PRECOMPUTE_INTERVAL_MIN * 60 * 1000);
 
 // ─── Graceful shutdown ─────────────────────────────────────────
 process.on("SIGTERM", () => {
