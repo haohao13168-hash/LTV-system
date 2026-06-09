@@ -156,6 +156,9 @@ async function getCachedUsers(platform, { forceRefresh = false } = {}) {
 }
 
 // ─── Lifetime pull: deposit from user.lifetimeDeposit (fast), withdraw per-user ──
+// Only depositors (lifetimeDeposit > 0) are queried for withdraws — per the
+// user's spec, non-depositors don't matter (they can't withdraw what they
+// never put in). This cuts withdraw calls from ~24K to ~4K.
 async function pullPlatformLifetime(platform) {
   // Use cached user list if fresh (up to 1h old) — saves ~60-90s per sync
   // by skipping the ~465-page user fetch. Cron runs every 10 min so users
@@ -168,11 +171,11 @@ async function pullPlatformLifetime(platform) {
     (s, u) => s + (parseFloat(u.lifetimeDeposit) || 0), 0
   );
 
-  // Withdraw: one API call per user
-  console.log(`  [${platform.name}] computing withdraw for ${allUsers.length} users (conc=${PER_USER_CONCURRENCY})…`);
+  // Withdraw: query ONLY depositors (not all users)
+  console.log(`  [${platform.name}] computing withdraw for ${depositors.length} depositors (was ${allUsers.length}, conc=${PER_USER_CONCURRENCY})…`);
   const start = Date.now();
   const userWithdraws = await withConcurrency(
-    allUsers,
+    depositors,
     (u) => getUserWithdrawInRange(u.id, WIDE_S_DATE, WIDE_E_DATE)
   );
   const totalWithdraw = userWithdraws.reduce((s, w) => s + w, 0);
@@ -187,23 +190,21 @@ async function pullPlatformLifetime(platform) {
   };
 }
 
-// ─── Range pull: both deposit and withdraw per-user with explicit dates ──
-// Big speedup: users with lifetimeDeposit=0 have NEVER made a real deposit, so
-// their deposit in any range is also 0 — skip the deposit query entirely
-// for them. Withdraw still has to be queried for everyone because BCB
-// doesn't expose lifetimeWithdraw.
+// ─── Range pull: deposit + withdraw per ever-depositor with explicit dates ──
+// We only iterate users who have any lifetime deposit. Non-depositors are
+// ignored everywhere (per user requirement) — they can't have deposited
+// inside the range either, and they can't withdraw what they never put in.
 async function pullPlatformRange(platform, sDate, eDate) {
   const allUsers = await getCachedUsers(platform); // use cache if fresh
   const depositors = allUsers.filter((u) => parseFloat(u.lifetimeDeposit) > 0);
 
-  console.log(`  [${platform.name}] range: ${allUsers.length} users, ${depositors.length} ever-depositors…`);
+  console.log(`  [${platform.name}] range: ${depositors.length} ever-depositors (out of ${allUsers.length} users)…`);
   const start = Date.now();
 
-  // Per user, fire dep (only if ever-depositor) + wd together.
-  const perUser = await withConcurrency(allUsers, async (u) => {
-    const isEverDepositor = parseFloat(u.lifetimeDeposit) > 0;
+  // Fire dep + wd in parallel per depositor.
+  const perUser = await withConcurrency(depositors, async (u) => {
     const [dep, wd] = await Promise.all([
-      isEverDepositor ? getUserDepositInRange(u.id, sDate, eDate) : Promise.resolve(0),
+      getUserDepositInRange(u.id, sDate, eDate),
       getUserWithdrawInRange(u.id, sDate, eDate),
     ]);
     return { dep, wd };
