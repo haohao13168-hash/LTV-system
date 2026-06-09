@@ -15,6 +15,7 @@ import DailyEntryTable from "@/components/DailyEntryTable";
 import ViewModeToggle from "@/components/ViewModeToggle";
 import BcbSyncButton from "@/components/BcbSyncButton";
 import BcbSubPlatformsTable from "@/components/BcbSubPlatformsTable";
+import BcbRangeBanner from "@/components/BcbRangeBanner";
 import {
   IconArrowLeft,
   IconUsers,
@@ -218,40 +219,16 @@ export default function CompanyDetailPage() {
         </div>
       </div>
 
-      {/* BCB date range loading / error / success banner */}
-      {isBcbParent && hasDateRange && (bcbRangeLoading || bcbRangeError || bcbRange) && (
-        <div className={`px-4 py-2.5 rounded-md text-sm flex items-center gap-2 ${
-          bcbRangeError
-            ? "bg-rose-500/10 border border-rose-500/30 text-rose-300"
-            : bcbRangeLoading
-            ? "bg-accent/5 border border-accent/30 text-text"
-            : "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300"
-        }`}>
-          {bcbRangeLoading && (
-            <>
-              <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              </svg>
-              <span>
-                Loading data for {dateRange.from} → {dateRange.to}…
-                {bcbRangeElapsedMs > 0 && (
-                  <span className="text-muted"> · {(bcbRangeElapsedMs / 1000).toFixed(0)}s elapsed</span>
-                )}
-              </span>
-            </>
-          )}
-          {bcbRangeError && <span>Range query failed: {bcbRangeError}</span>}
-          {!bcbRangeLoading && !bcbRangeError && bcbRange && (
-            <span>
-              ✓ Showing {dateRange.from} → {dateRange.to}
-              <span className="text-muted">
-                {" · pulled in "}
-                {((bcbRange.duration_ms || 0) / 1000).toFixed(1)}s
-                {bcbRange.fromCache && " (from cache)"}
-              </span>
-            </span>
-          )}
-        </div>
+      {/* BCB date range banner (premium loading / error / success) */}
+      {isBcbParent && hasDateRange && (
+        <BcbRangeBanner
+          from={dateRange.from}
+          to={dateRange.to}
+          loading={bcbRangeLoading}
+          error={bcbRangeError}
+          range={bcbRange}
+          elapsedMs={bcbRangeElapsedMs}
+        />
       )}
 
       {viewMode === "summary" ? (

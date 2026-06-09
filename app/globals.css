@@ -92,3 +92,11 @@ input, button, select, textarea { font: inherit; color: inherit; }
    Smooth theme transitions (subtle)
    ============================================================ */
 html { transition: color 200ms ease, background-color 200ms ease; }
+
+/* ============================================================
+   Shimmer (used by BCB range loading banner for a subtle sweep)
+   ============================================================ */
+@keyframes shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}

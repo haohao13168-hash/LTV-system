@@ -38,7 +38,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
 const ENDPOINT = `${BCB_API_BASE_URL.replace(/\/$/, "")}/api/v1/index.php`;
 
 // ─── Tunables ──────────────────────────────────────────────────
-const PER_USER_CONCURRENCY = 25;          // per-platform concurrent API calls
+const PER_USER_CONCURRENCY = 40;          // per-platform concurrent API calls
 const USER_CACHE_TTL_MS = 15 * 60 * 1000; // cached user lists usable for 15 min
 const WIDE_S_DATE = "2020-01-01 00:00:00";
 const WIDE_E_DATE = "2099-12-31 23:59:59";
@@ -177,16 +177,22 @@ async function pullPlatformLifetime(platform) {
 }
 
 // ─── Range pull: both deposit and withdraw per-user with explicit dates ──
+// Big speedup: users with lifetimeDeposit=0 have NEVER made a real deposit, so
+// their deposit in any range is also 0 — skip the deposit query entirely
+// for them. Withdraw still has to be queried for everyone because BCB
+// doesn't expose lifetimeWithdraw.
 async function pullPlatformRange(platform, sDate, eDate) {
   const allUsers = await getCachedUsers(platform); // use cache if fresh
+  const depositors = allUsers.filter((u) => parseFloat(u.lifetimeDeposit) > 0);
 
-  console.log(`  [${platform.name}] range query for ${allUsers.length} users…`);
+  console.log(`  [${platform.name}] range: ${allUsers.length} users, ${depositors.length} ever-depositors…`);
   const start = Date.now();
 
-  // Fire deposit + withdraw together per user (Promise.all inside the worker)
+  // Per user, fire dep (only if ever-depositor) + wd together.
   const perUser = await withConcurrency(allUsers, async (u) => {
+    const isEverDepositor = parseFloat(u.lifetimeDeposit) > 0;
     const [dep, wd] = await Promise.all([
-      getUserDepositInRange(u.id, sDate, eDate),
+      isEverDepositor ? getUserDepositInRange(u.id, sDate, eDate) : Promise.resolve(0),
       getUserWithdrawInRange(u.id, sDate, eDate),
     ]);
     return { dep, wd };
