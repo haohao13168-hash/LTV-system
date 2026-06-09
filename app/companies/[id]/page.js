@@ -57,8 +57,6 @@ export default function CompanyDetailPage() {
   const { currentUser } = useAuth();
   const canEdit = can(currentUser, "editData");
 
-  const company = getCompany(params.id);
-
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
