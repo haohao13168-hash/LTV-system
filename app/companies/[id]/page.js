@@ -15,6 +15,7 @@ import DailyEntryTable from "@/components/DailyEntryTable";
 import ViewModeToggle from "@/components/ViewModeToggle";
 import BcbSyncButton from "@/components/BcbSyncButton";
 import BcbSubPlatformsTable from "@/components/BcbSubPlatformsTable";
+import BcbDailyReport from "@/components/BcbDailyReport";
 import {
   IconArrowLeft,
   IconUsers,
@@ -311,7 +312,11 @@ export default function CompanyDetailPage() {
           )}
         </>
       ) : (
-        <DailyEntryTable company={company} dateRange={dateRange} />
+        isBcbParent ? (
+          <BcbDailyReport />
+        ) : (
+          <DailyEntryTable company={company} dateRange={dateRange} />
+        )
       )}
 
       <CompanyFormModal open={editOpen} onClose={() => setEditOpen(false)} mode="edit" company={company} />
