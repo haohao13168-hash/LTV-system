@@ -8,6 +8,7 @@ const {
   runRangeSyncCached,
   preComputeCommonRanges,
   startRangeJob,
+  startSyncJob,
   getJob,
   isRangeJobRunning,
   takeLifetimeSnapshotForDate,
@@ -152,6 +153,21 @@ const server = http.createServer(async (req, res) => {
     const job = getJob(jobId);
     if (!job) return send(404, { error: "Job not found (may have expired)" });
     return send(200, job);
+  }
+
+  // POST /sync/start — kick off a manual sync job (Refresh button)
+  if (req.method === "POST" && req.url === "/sync/start") {
+    const auth = req.headers["x-api-key"];
+    if (auth !== SYNC_API_KEY) return send(401, { error: "Unauthorized" });
+    if (syncInProgress) {
+      return send(409, { error: "Sync already in progress" });
+    }
+    try {
+      const jobId = startSyncJob();
+      return send(202, { jobId, status: "running" });
+    } catch (e) {
+      return send(500, { error: e.message });
+    }
   }
 
   // POST /backfill/start — kick off a backward snapshot-fill job

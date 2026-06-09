@@ -666,8 +666,11 @@ async function takeLifetimeSnapshotForDate(date, { force = false } = {}) {
 
 // ─── Backfill job ──────────────────────────────────────────────
 // Walks back from yesterday to platform_earliest_start, taking one
-// snapshot per day. Idempotent — skips dates we already have. Reports
-// progress via the same job state Map used for range queries.
+// snapshot per day. Yields whenever a user-initiated range query is
+// running so the BCB API budget goes to the user first.
+let backfillRunning = false;
+function isBackfillRunning() { return backfillRunning; }
+
 async function startBackfillJob() {
   const jobId = randomUUID();
   jobs.set(jobId, {
@@ -676,16 +679,15 @@ async function startBackfillJob() {
     finishedAt: null,
     result: null,
     error: null,
-    // backfill-specific
     totalDays: 0,
     doneDays: 0,
     skippedDays: 0,
     currentDate: null,
   });
 
+  backfillRunning = true;
   (async () => {
     try {
-      // Earliest start date across all platforms
       const { data: platforms } = await supabase
         .from("bcb_platforms")
         .select("name, start_date")
@@ -698,7 +700,6 @@ async function startBackfillJob() {
       const today = fmtDateOnly(new Date());
       const yesterday = addDaysISO(today, -1);
 
-      // Build list of dates from yesterday backward to earliest start
       const dates = [];
       let d = yesterday;
       while (d >= earliestStart) {
@@ -710,6 +711,11 @@ async function startBackfillJob() {
       if (job) job.totalDays = dates.length;
 
       for (const date of dates) {
+        // Yield to user-initiated range queries — pause until they finish
+        while (isRangeJobRunning()) {
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+
         const j = jobs.get(jobId);
         if (j) j.currentDate = date;
         try {
@@ -727,6 +733,8 @@ async function startBackfillJob() {
       finishJob(jobId, { result: { ok: true, totalDays: dates.length } });
     } catch (e) {
       finishJob(jobId, { error: e });
+    } finally {
+      backfillRunning = false;
     }
   })();
 
@@ -777,14 +785,30 @@ function startRangeJob(from, to) {
   return jobId;
 }
 
+// Start a manual sync job (Refresh button). Same async pattern as range.
+function startSyncJob() {
+  const jobId = randomUUID();
+  jobs.set(jobId, {
+    status: "running", from: null, to: null,
+    startedAt: Date.now(), finishedAt: null,
+    result: null, error: null,
+  });
+  runSync("manual")
+    .then((result) => finishJob(jobId, { result }))
+    .catch((error) => finishJob(jobId, { error }));
+  return jobId;
+}
+
 module.exports = {
   runSync,
   runRangeSync,
   runRangeSyncCached,
   preComputeCommonRanges,
   startRangeJob,
+  startSyncJob,
   getJob,
   isRangeJobRunning,
+  isBackfillRunning,
   takeLifetimeSnapshotForDate,
   startBackfillJob,
   addDaysISO,
