@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { useStore, sumEntries } from "@/lib/store";
 import { useAuth, can } from "@/lib/auth";
@@ -49,7 +49,7 @@ export default function CompanyDetailPage() {
   const {
     companies, loading, getCompany, deleteCompany,
     getReceivedStats, getCompanyStats,
-    bcbPlatforms, updateBcbPlatformDate,
+    bcbPlatforms, updateBcbPlatformDate, fetchBcbRange,
   } = useStore();
   // For BCB wallet-linked companies, top cards show OWN data (V12MY shows V12MY's
   // own depositors, BCB shows sum of all 6 platforms). For manual / daily-entry
@@ -64,6 +64,39 @@ export default function CompanyDetailPage() {
   const [dateRange, setDateRange] = useState({ from: "", to: "" });
   const [viewMode, setViewMode] = useState("summary"); // "summary" | "daily"
 
+  // ─── BCB date range query ──────────────────────────────────────
+  // When user picks a date range on a BCB-linked company, fire an on-demand
+  // query to the droplet for fresh per-day data. Results are not stored —
+  // each range pick triggers a new fetch (~30-60s).
+  const [bcbRange, setBcbRange] = useState(null);    // { platforms, total } or null
+  const [bcbRangeLoading, setBcbRangeLoading] = useState(false);
+  const [bcbRangeError, setBcbRangeError] = useState(null);
+
+  const company = getCompany(params.id);
+  const isBcbParent = company?.walletSource === "BCB_TOTAL";
+  const hasDateRange = !!(dateRange.from && dateRange.to);
+
+  useEffect(() => {
+    if (!isBcbParent || !hasDateRange) {
+      setBcbRange(null);
+      setBcbRangeError(null);
+      return;
+    }
+    let cancelled = false;
+    setBcbRangeLoading(true);
+    setBcbRangeError(null);
+    fetchBcbRange(dateRange.from, dateRange.to).then((r) => {
+      if (cancelled) return;
+      if (r?.error) setBcbRangeError(r.error);
+      else setBcbRange(r);
+      setBcbRangeLoading(false);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isBcbParent, dateRange.from, dateRange.to]);
+
+  // (state hooks above must run unconditionally; the early return only happens
+  // after all hooks have been declared)
   if (!company) {
     return (
       <div className="space-y-6">
@@ -88,16 +121,37 @@ export default function CompanyDetailPage() {
     );
   }
 
-  // BCB is the only wallet-linked company right now. Its top stats come from
-  // bcb_platforms (sum of the 6 sub-platforms inside BCB wallet). Non-BCB
-  // companies use the legacy "sum of others' contributions" view (will show 0
-  // until each one is bound to its own wallet later).
-  const isBcbParent = company.walletSource === "BCB_TOTAL";
-  const received = isBcbParent
-    ? getCompanyStats(company, dateRange)
-    : getReceivedStats(company, dateRange);
+  // BCB top stats: if a date range is set + the range query is loaded, use that.
+  // Otherwise show the lifetime numbers from bcb_platforms.
+  let received;
+  if (isBcbParent && bcbRange?.total) {
+    const t = bcbRange.total;
+    received = {
+      members: t.depositingMembers,
+      deposit: Math.round(t.totalDeposit),
+      withdraw: Math.round(t.totalWithdraw),
+      net: Math.round(t.net),
+    };
+  } else if (isBcbParent) {
+    received = getCompanyStats(company, dateRange);
+  } else {
+    received = getReceivedStats(company, dateRange);
+  }
   const perMember = received.members > 0 ? received.net / received.members : 0;
   const otherCompanies = companies.filter((c) => c.id !== company.id);
+
+  // For the sub-platforms table — same logic, range overrides lifetime
+  const platformsForTable = isBcbParent && bcbRange?.platforms
+    ? bcbRange.platforms.map((p) => {
+        const seed = bcbPlatforms.find((bp) => bp.name === p.name);
+        return {
+          ...seed,
+          depositing_members: p.depositingMembers,
+          total_deposit: p.totalDeposit,
+          total_withdraw: p.totalWithdraw,
+        };
+      })
+    : bcbPlatforms;
 
   return (
     <div className="space-y-6">
@@ -148,6 +202,33 @@ export default function CompanyDetailPage() {
         </div>
       </div>
 
+      {/* BCB date range loading / error banner */}
+      {isBcbParent && hasDateRange && (
+        <div className={`px-4 py-2.5 rounded-md text-sm flex items-center gap-2 ${
+          bcbRangeError
+            ? "bg-rose-500/10 border border-rose-500/30 text-rose-300"
+            : bcbRangeLoading
+            ? "bg-accent/5 border border-accent/30 text-text"
+            : "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300"
+        }`}>
+          {bcbRangeLoading && (
+            <>
+              <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+              <span>Loading data for {dateRange.from} → {dateRange.to}… (~30-60s)</span>
+            </>
+          )}
+          {bcbRangeError && <span>Range query failed: {bcbRangeError}</span>}
+          {!bcbRangeLoading && !bcbRangeError && bcbRange && (
+            <span>
+              ✓ Showing {dateRange.from} → {dateRange.to}
+              <span className="text-muted"> · pulled in {(bcbRange.duration_ms / 1000).toFixed(1)}s</span>
+            </span>
+          )}
+        </div>
+      )}
+
       {viewMode === "summary" ? (
         <>
           {/* Stat cards */}
@@ -170,7 +251,7 @@ export default function CompanyDetailPage() {
               legacy "Other Companies" list (empty until each is bound). */}
           {isBcbParent ? (
             <BcbSubPlatformsTable
-              platforms={bcbPlatforms}
+              platforms={platformsForTable}
               canEdit={canEdit}
               onUpdateDate={updateBcbPlatformDate}
             />

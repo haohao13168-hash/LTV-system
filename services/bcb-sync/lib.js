@@ -1,8 +1,8 @@
 // services/bcb-sync/lib.js
 // Core sync logic — pulls BCB wallet API, aggregates per platform, writes to Supabase.
-// Reused by both server.js (long-running) and sync-once.js (one-shot test).
+// Exposes runSync (lifetime, writes DB) and runRangeSync (custom date range,
+// returns data without writing DB).
 
-// Load .env first so process.env is populated for both Node CLI and PM2.
 require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 
 const dns = require("dns");
@@ -30,12 +30,18 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false },
-  // Node 20 has no native WebSocket — provide `ws` for the realtime client.
-  // We don't actually use realtime, but the client constructs it anyway.
+  // Node < 22 has no native WebSocket — pass ws as transport so supabase-js's
+  // realtime client doesn't blow up on init (we don't actually use realtime).
   realtime: { transport: ws },
 });
 
 const ENDPOINT = `${BCB_API_BASE_URL.replace(/\/$/, "")}/api/v1/index.php`;
+
+// ─── Tunables ──────────────────────────────────────────────────
+const PER_USER_CONCURRENCY = 25;          // per-platform concurrent API calls
+const USER_CACHE_TTL_MS = 15 * 60 * 1000; // cached user lists usable for 15 min
+const WIDE_S_DATE = "2020-01-01 00:00:00";
+const WIDE_E_DATE = "2099-12-31 23:59:59";
 
 // ─── BCB API call ──────────────────────────────────────────────
 async function bcb(module, extras = {}) {
@@ -60,7 +66,7 @@ async function bcb(module, extras = {}) {
 }
 
 // ─── Bounded-concurrency map ────────────────────────────────────
-async function withConcurrency(items, fn, concurrency = 10) {
+async function withConcurrency(items, fn, concurrency = PER_USER_CONCURRENCY) {
   const results = new Array(items.length);
   let nextIdx = 0;
   await Promise.all(
@@ -77,76 +83,89 @@ async function withConcurrency(items, fn, concurrency = 10) {
   return results;
 }
 
-// Lifetime WITHDRAW for one user. BCB's documented date format is
-// "YYYY-MM-DD HH:MM:SS" (with a space, NOT ISO with T). Without these
-// params the API only returns a short recent window. The 31-day max
-// applies merchant-wide but NOT to per-user queries.
-const WIDE_S_DATE = "2020-01-01 00:00:00";
-const WIDE_E_DATE = "2099-12-31 23:59:59";
+// ─── Per-user lifetime / range queries ──────────────────────────
+async function getUserDepositInRange(userId, sDate, eDate) {
+  try {
+    const r = await bcb("/transactions/getAllTransactions", {
+      userId: String(userId),
+      type: "DEPOSIT",
+      status: "COMPLETED",
+      sDate, eDate,
+      pageIndex: 1,
+    });
+    if (r.status !== "SUCCESS") return 0;
+    return Math.abs(parseFloat(r.data?.totalAmount) || 0);
+  } catch (e) { return 0; }
+}
 
-async function getUserLifetimeWithdraw(userId) {
+async function getUserWithdrawInRange(userId, sDate, eDate) {
   try {
     const r = await bcb("/transactions/getAllTransactions", {
       userId: String(userId),
       type: "WITHDRAW",
       status: "COMPLETED",
-      sDate: WIDE_S_DATE,
-      eDate: WIDE_E_DATE,
+      sDate, eDate,
       pageIndex: 1,
     });
     if (r.status !== "SUCCESS") return 0;
     return Math.abs(parseFloat(r.data?.totalAmount) || 0);
-  } catch (e) {
-    return 0;
-  }
+  } catch (e) { return 0; }
 }
 
-// ─── Pull all downline users for one platform, aggregate ───────
-async function pullPlatform(platform) {
+// ─── User list cache ───────────────────────────────────────────
+// platformName → { users: [...], at: epochMs }
+const userCache = new Map();
+
+async function fetchAllUsers(platform) {
   const allUsers = [];
   let page = 1;
   let totalPages = null;
-
   while (true) {
     const r = await bcb("/users/getAllUsers", {
       agent: platform.upline_code,
       pageIndex: page,
     });
     if (r.status !== "SUCCESS") {
-      throw new Error(
-        `${platform.name} page ${page}: ${r.data?.message || "unknown error"}`
-      );
+      throw new Error(`${platform.name} page ${page}: ${r.data?.message || "unknown"}`);
     }
     const batch = r.data?.users || [];
     allUsers.push(...batch);
     if (totalPages === null) totalPages = r.data?.totalPage || 1;
     page++;
-    if (page > totalPages) break;
-    if (batch.length === 0) break;
+    if (page > totalPages || batch.length === 0) break;
   }
+  return allUsers;
+}
 
-  const depositors = allUsers.filter(
-    (u) => parseFloat(u.lifetimeDeposit) > 0
-  );
+async function getCachedUsers(platform, { forceRefresh = false } = {}) {
+  const cached = userCache.get(platform.name);
+  if (!forceRefresh && cached && (Date.now() - cached.at) < USER_CACHE_TTL_MS) {
+    return cached.users;
+  }
+  const users = await fetchAllUsers(platform);
+  userCache.set(platform.name, { users, at: Date.now() });
+  return users;
+}
+
+// ─── Lifetime pull: deposit from user.lifetimeDeposit (fast), withdraw per-user ──
+async function pullPlatformLifetime(platform) {
+  const allUsers = await getCachedUsers(platform, { forceRefresh: true });
+
+  // Deposit: free from getAllUsers response
+  const depositors = allUsers.filter((u) => parseFloat(u.lifetimeDeposit) > 0);
   const totalDeposit = depositors.reduce(
-    (s, u) => s + (parseFloat(u.lifetimeDeposit) || 0),
-    0
+    (s, u) => s + (parseFloat(u.lifetimeDeposit) || 0), 0
   );
 
-  // Lifetime WITHDRAW per user — same model as deposit (sum per-user values).
-  // Uses /transactions/getAllTransactions with userId filter → totalAmount.
-  // Bounded concurrency so we don't hammer the BCB API.
-  console.log(`  [${platform.name}] computing withdraw for ${allUsers.length} users…`);
-  const withdrawStart = Date.now();
+  // Withdraw: one API call per user
+  console.log(`  [${platform.name}] computing withdraw for ${allUsers.length} users (conc=${PER_USER_CONCURRENCY})…`);
+  const start = Date.now();
   const userWithdraws = await withConcurrency(
     allUsers,
-    (u) => getUserLifetimeWithdraw(u.id),
-    10
+    (u) => getUserWithdrawInRange(u.id, WIDE_S_DATE, WIDE_E_DATE)
   );
   const totalWithdraw = userWithdraws.reduce((s, w) => s + w, 0);
-  console.log(
-    `  [${platform.name}] withdraw done in ${((Date.now() - withdrawStart) / 1000).toFixed(1)}s — RM ${totalWithdraw.toFixed(2)}`
-  );
+  console.log(`  [${platform.name}] done in ${((Date.now() - start) / 1000).toFixed(1)}s — RM ${totalWithdraw.toFixed(2)} wd`);
 
   return {
     name: platform.name,
@@ -157,7 +176,38 @@ async function pullPlatform(platform) {
   };
 }
 
-// ─── Full sync — pull all 6 platforms (parallel), write to Supabase ──
+// ─── Range pull: both deposit and withdraw per-user with explicit dates ──
+async function pullPlatformRange(platform, sDate, eDate) {
+  const allUsers = await getCachedUsers(platform); // use cache if fresh
+
+  console.log(`  [${platform.name}] range query for ${allUsers.length} users…`);
+  const start = Date.now();
+
+  // Fire deposit + withdraw together per user (Promise.all inside the worker)
+  const perUser = await withConcurrency(allUsers, async (u) => {
+    const [dep, wd] = await Promise.all([
+      getUserDepositInRange(u.id, sDate, eDate),
+      getUserWithdrawInRange(u.id, sDate, eDate),
+    ]);
+    return { dep, wd };
+  });
+
+  const totalDeposit = perUser.reduce((s, r) => s + r.dep, 0);
+  const totalWithdraw = perUser.reduce((s, r) => s + r.wd, 0);
+  const depositingMembers = perUser.filter((r) => r.dep > 0).length;
+
+  console.log(`  [${platform.name}] range done in ${((Date.now() - start) / 1000).toFixed(1)}s — ${depositingMembers} dep, RM ${totalDeposit.toFixed(2)} / ${totalWithdraw.toFixed(2)}`);
+
+  return {
+    name: platform.name,
+    totalDownline: allUsers.length,
+    depositingMembers,
+    totalDeposit,
+    totalWithdraw,
+  };
+}
+
+// ─── Full lifetime sync — writes to Supabase ───────────────────
 async function runSync(trigger = "manual") {
   const startTime = Date.now();
   console.log(`[${new Date().toISOString()}] Sync started (${trigger})`);
@@ -166,15 +216,11 @@ async function runSync(trigger = "manual") {
   const { data: logRow, error: logErr } = await supabase
     .from("bcb_sync_log")
     .insert({ status: "running", trigger_source: trigger })
-    .select()
-    .single();
-  if (logErr) {
-    throw new Error(`Failed to create sync log row: ${logErr.message}`);
-  }
+    .select().single();
+  if (logErr) throw new Error(`Failed to create sync log row: ${logErr.message}`);
   const logId = logRow.id;
 
   try {
-    // Read platforms config from DB
     const { data: platforms, error: pErr } = await supabase
       .from("bcb_platforms")
       .select("id, name, upline_code, display_order")
@@ -184,27 +230,21 @@ async function runSync(trigger = "manual") {
       throw new Error("No platforms configured in bcb_platforms table");
     }
 
-    // Pull all platforms in parallel
     const results = await Promise.all(
       platforms.map((p) =>
-        pullPlatform(p).then(
+        pullPlatformLifetime(p).then(
           (r) => ({ ok: true, ...r }),
           (e) => ({ ok: false, name: p.name, error: e.message })
         )
       )
     );
 
-    // Check for any failures
     const failed = results.filter((r) => !r.ok);
-    if (failed.length === platforms.length) {
-      throw new Error(
-        `All platforms failed. First error: ${failed[0].error}`
-      );
+    const successful = results.filter((r) => r.ok);
+    if (successful.length === 0) {
+      throw new Error(`All platforms failed. First error: ${failed[0]?.error}`);
     }
 
-    const successful = results.filter((r) => r.ok);
-
-    // Write snapshots (each platform already has totalWithdraw from its own pull)
     const now = new Date().toISOString();
     for (const r of successful) {
       const { error } = await supabase
@@ -218,33 +258,18 @@ async function runSync(trigger = "manual") {
           updated_at: now,
         })
         .eq("name", r.name);
-      if (error)
-        throw new Error(`Failed to update ${r.name}: ${error.message}`);
+      if (error) throw new Error(`Failed to update ${r.name}: ${error.message}`);
     }
 
-    // Compute totals
-    const totalDownline = successful.reduce(
-      (s, r) => s + r.totalDownline,
-      0
-    );
-    const totalDepositing = successful.reduce(
-      (s, r) => s + r.depositingMembers,
-      0
-    );
-    const totalDeposit = successful.reduce(
-      (s, r) => s + r.totalDeposit,
-      0
-    );
-    const totalWithdraw = successful.reduce(
-      (s, r) => s + (r.totalWithdraw || 0),
-      0
-    );
+    const totalDownline = successful.reduce((s, r) => s + r.totalDownline, 0);
+    const totalDepositing = successful.reduce((s, r) => s + r.depositingMembers, 0);
+    const totalDeposit = successful.reduce((s, r) => s + r.totalDeposit, 0);
+    const totalWithdraw = successful.reduce((s, r) => s + r.totalWithdraw, 0);
 
-    // Mark log as success
-    const partialNotes = [];
-    if (failed.length > 0) {
-      partialNotes.push(`Failed platforms: ${failed.map((f) => f.name).join(",")}`);
-    }
+    const partialNotes = failed.length > 0
+      ? `Failed platforms: ${failed.map((f) => f.name).join(",")}`
+      : null;
+
     await supabase
       .from("bcb_sync_log")
       .update({
@@ -256,14 +281,12 @@ async function runSync(trigger = "manual") {
         total_depositing_members: totalDepositing,
         total_deposit: totalDeposit,
         total_withdraw: totalWithdraw,
-        error_message: partialNotes.length > 0 ? partialNotes.join(" | ") : null,
+        error_message: partialNotes,
       })
       .eq("id", logId);
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(
-      `[${new Date().toISOString()}] Sync DONE in ${elapsed}s — ${totalDepositing} depositors, RM ${totalDeposit.toFixed(2)} dep / RM ${totalWithdraw.toFixed(2)} wd`
-    );
+    console.log(`[${new Date().toISOString()}] Sync DONE in ${elapsed}s — ${totalDepositing} dep, RM ${totalDeposit.toFixed(2)} / ${totalWithdraw.toFixed(2)}`);
 
     return {
       ok: true,
@@ -276,10 +299,7 @@ async function runSync(trigger = "manual") {
       failed: failed.map((f) => ({ name: f.name, error: f.error })),
     };
   } catch (e) {
-    console.error(
-      `[${new Date().toISOString()}] Sync FAILED:`,
-      e.message
-    );
+    console.error(`[${new Date().toISOString()}] Sync FAILED:`, e.message);
     await supabase
       .from("bcb_sync_log")
       .update({
@@ -293,4 +313,50 @@ async function runSync(trigger = "manual") {
   }
 }
 
-module.exports = { runSync, pullPlatform, bcb };
+// ─── Range query — returns data without touching DB ────────────
+// Takes `from` and `to` as YYYY-MM-DD strings.
+async function runRangeSync(from, to) {
+  const startTime = Date.now();
+  const sDate = `${from} 00:00:00`;
+  const eDate = `${to} 23:59:59`;
+  console.log(`[${new Date().toISOString()}] Range query ${sDate} → ${eDate}`);
+
+  const { data: platforms, error: pErr } = await supabase
+    .from("bcb_platforms")
+    .select("id, name, upline_code, display_order")
+    .order("display_order");
+  if (pErr) throw new Error(`Failed to read platforms: ${pErr.message}`);
+
+  const results = await Promise.all(
+    platforms.map((p) =>
+      pullPlatformRange(p, sDate, eDate).then(
+        (r) => ({ ok: true, ...r }),
+        (e) => ({ ok: false, name: p.name, error: e.message })
+      )
+    )
+  );
+
+  const successful = results.filter((r) => r.ok);
+  const failed = results.filter((r) => !r.ok);
+
+  const total = {
+    depositingMembers: successful.reduce((s, r) => s + r.depositingMembers, 0),
+    totalDeposit: successful.reduce((s, r) => s + r.totalDeposit, 0),
+    totalWithdraw: successful.reduce((s, r) => s + r.totalWithdraw, 0),
+  };
+  total.net = total.totalDeposit - total.totalWithdraw;
+
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[${new Date().toISOString()}] Range done in ${elapsed}s`);
+
+  return {
+    ok: true,
+    from, to,
+    duration_ms: Date.now() - startTime,
+    platforms: successful.map(({ ok, ...rest }) => rest),
+    total,
+    failed: failed.map((f) => ({ name: f.name, error: f.error })),
+  };
+}
+
+module.exports = { runSync, runRangeSync, bcb };
