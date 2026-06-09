@@ -60,9 +60,6 @@ async function bcb(module, extras = {}) {
 }
 
 // ─── Pull all downline users for one platform, aggregate ───────
-// Uses includeBetInfo=1 so each user comes back with `totalBet` (lifetime
-// bet amount). "Withdraw" in the dashboard = ticket sum = totalBet, NOT
-// bank withdrawals — that's the metric the BCB backend uses.
 async function pullPlatform(platform) {
   const allUsers = [];
   let page = 1;
@@ -72,7 +69,6 @@ async function pullPlatform(platform) {
     const r = await bcb("/users/getAllUsers", {
       agent: platform.upline_code,
       pageIndex: page,
-      includeBetInfo: 1,
     });
     if (r.status !== "SUCCESS") {
       throw new Error(
@@ -94,20 +90,49 @@ async function pullPlatform(platform) {
     (s, u) => s + (parseFloat(u.lifetimeDeposit) || 0),
     0
   );
-  // Sum totalBet across all users (not just depositors — non-depositors can
-  // still bet using bonus credits).
-  const totalBet = allUsers.reduce((s, u) => {
-    const bet = parseFloat(u?.totalBet?.[0]?.total) || 0;
-    return s + bet;
-  }, 0);
+
+  // Return all user IDs (stringified) so we can attribute WITHDRAW
+  // transactions back to the right upline.
+  const userIds = allUsers.map((u) => String(u.id));
 
   return {
     name: platform.name,
     totalDownline: allUsers.length,
     depositingMembers: depositors.length,
     totalDeposit,
-    totalBet,
+    userIds,
   };
+}
+
+// ─── Pull all WITHDRAW transactions (status=COMPLETED) ─────────
+// Returns array of { userId, amount } so the caller can attribute each
+// withdraw to its upline.
+async function pullAllWithdraws() {
+  const out = [];
+  let page = 1;
+  let totalPages = null;
+  while (true) {
+    const r = await bcb("/transactions/getAllTransactions", {
+      type: "WITHDRAW",
+      status: "COMPLETED",
+      pageIndex: page,
+    });
+    if (r.status !== "SUCCESS") {
+      throw new Error(`withdraw tx page ${page}: ${r.data?.message || "unknown"}`);
+    }
+    const batch = r.data?.transactions || [];
+    for (const tx of batch) {
+      // `cash` is negative for withdraws ("-100.10"). We want the absolute value.
+      const amount = Math.abs(parseFloat(tx.cash) || 0);
+      const userId = tx.user?.id != null ? String(tx.user.id) : null;
+      if (userId && amount > 0) out.push({ userId, amount });
+    }
+    if (totalPages === null) totalPages = r.data?.totalPage || 1;
+    page++;
+    if (page > totalPages) break;
+    if (batch.length === 0) break;
+  }
+  return out;
 }
 
 // ─── Full sync — pull all 6 platforms (parallel), write to Supabase ──
@@ -157,23 +182,48 @@ async function runSync(trigger = "manual") {
 
     const successful = results.filter((r) => r.ok);
 
-    // Write snapshots for successful pulls. "Withdraw" = totalBet (ticket sum)
-    // — this is what the BCB backend reports as their withdraw metric.
+    // Build user_id → platform map (stringified keys) for attributing withdraws
+    const userToPlatform = new Map();
+    for (const r of successful) {
+      for (const uid of r.userIds || []) userToPlatform.set(String(uid), r.name);
+    }
+
+    // Pull all completed WITHDRAW transactions, sum per platform
+    const withdrawByPlatform = new Map();
+    let unattributedWithdraw = 0;
+    let withdrawError = null;
+    try {
+      const withdraws = await pullAllWithdraws();
+      for (const w of withdraws) {
+        const plat = userToPlatform.get(w.userId);
+        if (!plat) { unattributedWithdraw += w.amount; continue; }
+        withdrawByPlatform.set(plat, (withdrawByPlatform.get(plat) || 0) + w.amount);
+      }
+    } catch (e) {
+      withdrawError = e.message;
+      console.warn(`Withdraw pull failed: ${e.message}`);
+    }
+
+    // Write snapshots
     const now = new Date().toISOString();
     for (const r of successful) {
+      const totalWithdraw = withdrawByPlatform.get(r.name) || 0;
       const { error } = await supabase
         .from("bcb_platforms")
         .update({
           total_downline: r.totalDownline,
           depositing_members: r.depositingMembers,
           total_deposit: r.totalDeposit,
-          total_withdraw: r.totalBet,
+          total_withdraw: totalWithdraw,
           last_synced_at: now,
           updated_at: now,
         })
         .eq("name", r.name);
       if (error)
         throw new Error(`Failed to update ${r.name}: ${error.message}`);
+    }
+    if (unattributedWithdraw > 0) {
+      console.log(`Unattributed withdraw (not in our 6 platforms): RM ${unattributedWithdraw.toFixed(2)}`);
     }
 
     // Compute totals
@@ -189,8 +239,8 @@ async function runSync(trigger = "manual") {
       (s, r) => s + r.totalDeposit,
       0
     );
-    const totalWithdraw = successful.reduce(
-      (s, r) => s + (r.totalBet || 0),
+    const totalWithdraw = Array.from(withdrawByPlatform.values()).reduce(
+      (s, v) => s + v,
       0
     );
 
@@ -198,6 +248,9 @@ async function runSync(trigger = "manual") {
     const partialNotes = [];
     if (failed.length > 0) {
       partialNotes.push(`Failed platforms: ${failed.map((f) => f.name).join(",")}`);
+    }
+    if (withdrawError) {
+      partialNotes.push(`Withdraw pull error: ${withdrawError}`);
     }
     await supabase
       .from("bcb_sync_log")
