@@ -15,7 +15,6 @@ import DailyEntryTable from "@/components/DailyEntryTable";
 import ViewModeToggle from "@/components/ViewModeToggle";
 import BcbSyncButton from "@/components/BcbSyncButton";
 import BcbSubPlatformsTable from "@/components/BcbSubPlatformsTable";
-import BcbRangeBanner from "@/components/BcbRangeBanner";
 import {
   IconArrowLeft,
   IconUsers,
@@ -219,16 +218,12 @@ export default function CompanyDetailPage() {
         </div>
       </div>
 
-      {/* BCB date range banner (premium loading / error / success) */}
-      {isBcbParent && hasDateRange && (
-        <BcbRangeBanner
-          from={dateRange.from}
-          to={dateRange.to}
-          loading={bcbRangeLoading}
-          error={bcbRangeError}
-          range={bcbRange}
-          elapsedMs={bcbRangeElapsedMs}
-        />
+      {/* BCB range error only — success/loading are reflected in the
+          date filter trigger button (compact, less ugly). */}
+      {isBcbParent && hasDateRange && bcbRangeError && (
+        <div className="px-3.5 py-2 rounded-md text-xs bg-rose-500/10 border border-rose-500/30 text-rose-300">
+          {bcbRangeError}
+        </div>
       )}
 
       {viewMode === "summary" ? (

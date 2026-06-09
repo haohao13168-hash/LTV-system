@@ -485,14 +485,252 @@ async function runRangeSync(from, to) {
 
 // Cache-aware wrapper — checks cache first, falls back to runRangeSync.
 async function runRangeSyncCached(from, to) {
+  // 1. In-memory cache (last 15 min)
   const cached = getCachedRange(from, to);
   if (cached) {
     console.log(`[${new Date().toISOString()}] Range cache HIT ${from}→${to} (age ${Math.round(cached.cacheAgeMs / 1000)}s)`);
     return cached;
   }
+  // 2. Try DB snapshots (instant if covered)
+  const fromSnap = await tryRangeFromSnapshots(from, to);
+  if (fromSnap) {
+    setCachedRange(from, to, fromSnap);
+    return { ...fromSnap, fromCache: false };
+  }
+  // 3. Fall back to live BCB API query
   const fresh = await runRangeSync(from, to);
   setCachedRange(from, to, fresh);
   return { ...fresh, fromCache: false };
+}
+
+// ─── Snapshot-based range query (fast, DB-only) ────────────────
+// Returns null if we don't have full snapshot coverage for the range.
+// Mathematically: range(from..to) = lifetime(to) - lifetime(from - 1)
+function fmtDateOnly(d) { return d.toISOString().slice(0, 10); }
+function addDaysISO(dateStr, n) {
+  const d = new Date(dateStr + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return fmtDateOnly(d);
+}
+
+async function tryRangeFromSnapshots(from, to) {
+  const today = fmtDateOnly(new Date());
+  const fromMinus1 = addDaysISO(from, -1);
+
+  // We need lifetime totals at end-of-day `to` and end-of-day `fromMinus1`.
+  // For `to` = today, we use bcb_platforms (current live lifetime totals).
+  // For other dates, we look up bcb_lifetime_snapshots.
+
+  // Fetch "to" lifetimes
+  let toRows;
+  if (to >= today) {
+    // Use current live data from bcb_platforms (most recent sync, max 10min old)
+    const { data, error } = await supabase
+      .from("bcb_platforms")
+      .select("name, depositing_members, total_deposit, total_withdraw, total_downline, display_order")
+      .order("display_order");
+    if (error || !data || data.length === 0) return null;
+    toRows = data.map((r) => ({
+      name: r.name,
+      depositingMembers: r.depositing_members,
+      totalDeposit: parseFloat(r.total_deposit) || 0,
+      totalWithdraw: parseFloat(r.total_withdraw) || 0,
+      totalDownline: r.total_downline,
+    }));
+  } else {
+    const { data, error } = await supabase
+      .from("bcb_lifetime_snapshots")
+      .select("*")
+      .eq("date", to);
+    if (error || !data || data.length === 0) return null;
+    toRows = data.map((r) => ({
+      name: r.platform_name,
+      depositingMembers: r.depositing_members,
+      totalDeposit: parseFloat(r.total_deposit) || 0,
+      totalWithdraw: parseFloat(r.total_withdraw) || 0,
+      totalDownline: r.total_downline,
+    }));
+  }
+
+  // Fetch "from - 1" snapshot
+  const { data: fromMinus1Rows, error: e2 } = await supabase
+    .from("bcb_lifetime_snapshots")
+    .select("*")
+    .eq("date", fromMinus1);
+  if (e2) return null;
+  const fromMap = new Map();
+  for (const r of fromMinus1Rows || []) fromMap.set(r.platform_name, r);
+
+  // For each platform, compute the diff
+  const platforms = toRows.map((to_) => {
+    const fromRow = fromMap.get(to_.name);
+    const fromDep = fromRow ? parseFloat(fromRow.total_deposit) || 0 : 0;
+    const fromWd  = fromRow ? parseFloat(fromRow.total_withdraw) || 0 : 0;
+    const fromMembers = fromRow ? fromRow.depositing_members || 0 : 0;
+    return {
+      name: to_.name,
+      totalDownline: to_.totalDownline,
+      depositingMembers: Math.max(0, (to_.depositingMembers || 0) - fromMembers),
+      totalDeposit: Math.max(0, to_.totalDeposit - fromDep),
+      totalWithdraw: Math.max(0, to_.totalWithdraw - fromWd),
+    };
+  });
+
+  const total = {
+    depositingMembers: platforms.reduce((s, r) => s + r.depositingMembers, 0),
+    totalDeposit: platforms.reduce((s, r) => s + r.totalDeposit, 0),
+    totalWithdraw: platforms.reduce((s, r) => s + r.totalWithdraw, 0),
+  };
+  total.net = total.totalDeposit - total.totalWithdraw;
+
+  return {
+    ok: true,
+    from, to,
+    duration_ms: 0,
+    platforms,
+    total,
+    failed: [],
+    source: "snapshot",
+  };
+}
+
+// ─── Snapshot computation (one date at a time) ─────────────────
+// For each platform, query each current depositor's lifetime deposit AND
+// withdraw with eDate = end of `date`. Sum, store in bcb_lifetime_snapshots.
+// Skips if a row already exists for (date, platform).
+async function takeLifetimeSnapshotForDate(date, { force = false } = {}) {
+  const sDate = WIDE_S_DATE;
+  const eDate = `${date} 23:59:59`;
+  const computedAt = new Date().toISOString();
+
+  // Check existing rows so we can skip already-done platforms
+  let existing = new Set();
+  if (!force) {
+    const { data: rows } = await supabase
+      .from("bcb_lifetime_snapshots")
+      .select("platform_name")
+      .eq("date", date);
+    existing = new Set((rows || []).map((r) => r.platform_name));
+  }
+
+  const { data: platforms, error: pErr } = await supabase
+    .from("bcb_platforms")
+    .select("id, name, upline_code, display_order")
+    .order("display_order");
+  if (pErr) throw new Error(`Failed to read platforms: ${pErr.message}`);
+
+  const todo = platforms.filter((p) => !existing.has(p.name));
+  if (todo.length === 0) return { date, skipped: true, platforms: 0 };
+
+  console.log(`[snapshot ${date}] computing ${todo.length} platform(s)…`);
+  const startedAt = Date.now();
+
+  const results = await Promise.all(
+    todo.map(async (p) => {
+      const allUsers = await getCachedUsers(p);
+      const depositors = allUsers.filter((u) => parseFloat(u.lifetimeDeposit) > 0);
+
+      // Per depositor, query deposit + withdraw up to end-of-day `date`
+      const perUser = await withConcurrency(depositors, async (u) => {
+        const [dep, wd] = await Promise.all([
+          getUserDepositInRange(u.id, sDate, eDate),
+          getUserWithdrawInRange(u.id, sDate, eDate),
+        ]);
+        return { dep, wd };
+      });
+
+      const totalDeposit = perUser.reduce((s, r) => s + r.dep, 0);
+      const totalWithdraw = perUser.reduce((s, r) => s + r.wd, 0);
+      const depositingMembers = perUser.filter((r) => r.dep > 0).length;
+
+      const { error: insErr } = await supabase
+        .from("bcb_lifetime_snapshots")
+        .upsert({
+          date,
+          platform_name: p.name,
+          depositing_members: depositingMembers,
+          total_deposit: totalDeposit,
+          total_withdraw: totalWithdraw,
+          total_downline: allUsers.length,
+          computed_at: computedAt,
+        }, { onConflict: "date,platform_name" });
+      if (insErr) throw new Error(`Snapshot upsert failed for ${p.name}: ${insErr.message}`);
+
+      return { name: p.name, totalDeposit, totalWithdraw, depositingMembers };
+    })
+  );
+
+  console.log(`[snapshot ${date}] done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+  return { date, skipped: false, platforms: results.length, results };
+}
+
+// ─── Backfill job ──────────────────────────────────────────────
+// Walks back from yesterday to platform_earliest_start, taking one
+// snapshot per day. Idempotent — skips dates we already have. Reports
+// progress via the same job state Map used for range queries.
+async function startBackfillJob() {
+  const jobId = randomUUID();
+  jobs.set(jobId, {
+    status: "running",
+    startedAt: Date.now(),
+    finishedAt: null,
+    result: null,
+    error: null,
+    // backfill-specific
+    totalDays: 0,
+    doneDays: 0,
+    skippedDays: 0,
+    currentDate: null,
+  });
+
+  (async () => {
+    try {
+      // Earliest start date across all platforms
+      const { data: platforms } = await supabase
+        .from("bcb_platforms")
+        .select("name, start_date")
+        .order("display_order");
+      const earliestStart = platforms
+        .map((p) => p.start_date)
+        .filter(Boolean)
+        .sort()[0];
+
+      const today = fmtDateOnly(new Date());
+      const yesterday = addDaysISO(today, -1);
+
+      // Build list of dates from yesterday backward to earliest start
+      const dates = [];
+      let d = yesterday;
+      while (d >= earliestStart) {
+        dates.push(d);
+        d = addDaysISO(d, -1);
+      }
+
+      const job = jobs.get(jobId);
+      if (job) job.totalDays = dates.length;
+
+      for (const date of dates) {
+        const j = jobs.get(jobId);
+        if (j) j.currentDate = date;
+        try {
+          const res = await takeLifetimeSnapshotForDate(date);
+          const jj = jobs.get(jobId);
+          if (jj) {
+            if (res.skipped) jj.skippedDays++;
+            else jj.doneDays++;
+          }
+        } catch (e) {
+          console.warn(`Backfill ${date} failed: ${e.message}`);
+        }
+      }
+
+      finishJob(jobId, { result: { ok: true, totalDays: dates.length } });
+    } catch (e) {
+      finishJob(jobId, { error: e });
+    }
+  })();
+
+  return jobId;
 }
 
 // Pre-compute the common ranges. Designed to be called from a cron.
@@ -547,5 +785,9 @@ module.exports = {
   startRangeJob,
   getJob,
   isRangeJobRunning,
+  takeLifetimeSnapshotForDate,
+  startBackfillJob,
+  addDaysISO,
+  fmtDateOnly,
   bcb,
 };

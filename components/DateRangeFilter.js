@@ -161,14 +161,22 @@ export default function DateRangeFilter({ value, onChange, onSubmit, submitLabel
       <button
         onClick={() => setOpen((o) => !o)}
         className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-medium transition-colors ${
-          open || hasRange
+          submitting
+            ? "border-accent/60 bg-accent/10 text-text"
+            : open || hasRange
             ? "border-accent/40 bg-accent/5 text-text"
             : "border-border bg-surface text-text hover:bg-surfaceHover"
         }`}
       >
-        <IconCalendar className="h-3.5 w-3.5 text-muted" />
-        <span>{triggerLabel}</span>
-        {days !== null && (
+        {submitting ? (
+          <svg className="h-3.5 w-3.5 animate-spin text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round">
+            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+          </svg>
+        ) : (
+          <IconCalendar className="h-3.5 w-3.5 text-muted" />
+        )}
+        <span>{submitting ? "Loading…" : triggerLabel}</span>
+        {!submitting && days !== null && (
           <span className="text-muted font-normal tabular-nums">· {days} {t("daysCount")}</span>
         )}
         <IconChevronDown className={`h-3.5 w-3.5 text-muted transition-transform ${open ? "rotate-180" : ""}`} />

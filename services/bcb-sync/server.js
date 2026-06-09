@@ -10,6 +10,10 @@ const {
   startRangeJob,
   getJob,
   isRangeJobRunning,
+  takeLifetimeSnapshotForDate,
+  startBackfillJob,
+  addDaysISO,
+  fmtDateOnly,
 } = require("./lib");
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -150,9 +154,25 @@ const server = http.createServer(async (req, res) => {
     return send(200, job);
   }
 
+  // POST /backfill/start — kick off a backward snapshot-fill job
+  if (req.method === "POST" && req.url === "/backfill/start") {
+    const auth = req.headers["x-api-key"];
+    if (auth !== SYNC_API_KEY) return send(401, { error: "Unauthorized" });
+    try {
+      const jobId = startBackfillJob();
+      return send(202, { jobId, status: "running" });
+    } catch (e) {
+      return send(500, { error: e.message });
+    }
+  }
+
   return send(404, {
     error: "Not Found",
-    availableEndpoints: ["GET /health", "POST /sync", "POST /range", "POST /range/start", "GET /range/status?id=X"]
+    availableEndpoints: [
+      "GET /health", "POST /sync",
+      "POST /range", "POST /range/start", "GET /range/status?id=X",
+      "POST /backfill/start"
+    ]
   });
 });
 
@@ -207,6 +227,36 @@ async function runPreCompute() {
 // Kick off first pre-compute after startup sync (~3 min in)
 setTimeout(() => runPreCompute(), 3 * 60 * 1000);
 setInterval(runPreCompute, PRECOMPUTE_INTERVAL_MIN * 60 * 1000);
+
+// ─── Nightly snapshot — takes yesterday's lifetime totals ──────
+// Runs at 00:30 Malaysia time (16:30 UTC). Stores a permanent row per
+// platform in bcb_lifetime_snapshots so range queries become instant.
+async function nightlySnapshot() {
+  if (syncInProgress || isRangeJobRunning()) {
+    console.log("Skipping nightly snapshot — other work in progress");
+    return;
+  }
+  const yesterday = addDaysISO(fmtDateOnly(new Date()), -1);
+  console.log(`[nightly] taking snapshot for ${yesterday}…`);
+  try {
+    await takeLifetimeSnapshotForDate(yesterday);
+  } catch (e) {
+    console.error("Nightly snapshot failed:", e.message);
+  }
+}
+function scheduleNightlySnapshot() {
+  const next = new Date();
+  next.setUTCHours(16, 30, 0, 0); // 00:30 MY = 16:30 UTC
+  if (next <= new Date()) next.setUTCDate(next.getUTCDate() + 1);
+  const delayMs = next.getTime() - Date.now();
+  console.log(`[nightly] next snapshot in ${(delayMs / 60000).toFixed(1)} min`);
+  setTimeout(() => {
+    nightlySnapshot().finally(() => {
+      setInterval(nightlySnapshot, 24 * 60 * 60 * 1000); // every 24h after
+    });
+  }, delayMs);
+}
+scheduleNightlySnapshot();
 
 // ─── Graceful shutdown ─────────────────────────────────────────
 process.on("SIGTERM", () => {
