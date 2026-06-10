@@ -264,60 +264,19 @@ export default function CompanyDetailPage() {
               onUpdateDate={updateBcbPlatformDate}
             />
           ) : (
-            <div className="bg-surface border border-border rounded-lg overflow-hidden shadow-card">
-              <div className="px-5 py-3.5 border-b border-border flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-text">{t("otherCompanies")}</h2>
-                <span className="text-xs text-muted">{otherCompanies.length}</span>
+            // Company is NOT bound to its own wallet yet — show an empty
+            // state, NOT a list of other companies' wallet totals.
+            <div className="bg-surface border border-border rounded-lg p-10 text-center shadow-card">
+              <div className="mx-auto h-10 w-10 rounded-md bg-background border border-border flex items-center justify-center text-muted mb-3">
+                <IconBuilding className="h-5 w-5" />
               </div>
-
-              {otherCompanies.length === 0 ? (
-                <div className="p-8 text-center text-sm text-muted">{t("noOtherCompanies")}</div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-xs uppercase tracking-wider text-muted border-b border-border">
-                        <th className="px-5 py-3 font-medium">{t("companyName")}</th>
-                        <th className="px-5 py-3 font-medium text-right">{t("members")}</th>
-                        <th className="px-5 py-3 font-medium text-right">{t("deposit")}</th>
-                        <th className="px-5 py-3 font-medium text-right">{t("withdraw")}</th>
-                        <th className="px-5 py-3 font-medium text-right">{t("net")}</th>
-                        <th className="px-5 py-3 font-medium text-right">{t("valuePerMember")}</th>
-                        <th className="px-5 py-3 font-medium">{t("startOn")}</th>
-                        <th className="px-5 py-3 font-medium w-8"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {otherCompanies.map((o) => {
-                        const os = getCompanyStats(o, dateRange);
-                        const oPerMember = os.members > 0 ? os.net / os.members : 0;
-                        return (
-                          <tr key={o.id} className="border-b border-border last:border-0 hover:bg-surfaceHover/40 group">
-                            <td className="px-5 py-3">
-                              <Link href={`/companies/${o.id}`} className="inline-flex items-center gap-2.5 group">
-                                <CompanyAvatar company={o} size="md" />
-                                <span className="text-text group-hover:text-accent transition-colors">{o.name}</span>
-                              </Link>
-                            </td>
-                            <td className="px-5 py-3 text-right tabular-nums">{fmtNum(os.members)}</td>
-                            <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(os.deposit)}</td>
-                            <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(os.withdraw)}</td>
-                            <td className="px-5 py-3 text-right tabular-nums text-text">{fmtMoney(os.net)}</td>
-                            <td className="px-5 py-3 text-right tabular-nums">{fmtPerMember(oPerMember)}</td>
-                            <td className="px-5 py-3 text-muted tabular-nums">{o.createdAt}</td>
-                            <td className="px-5 py-3 text-right">
-                              <Link href={`/companies/${o.id}`}
-                                className="inline-flex text-muted hover:text-accent opacity-0 group-hover:opacity-100 transition-opacity">
-                                <IconChevronRight className="h-4 w-4" />
-                              </Link>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              <p className="text-sm text-text font-medium mb-1">
+                {company.name} isn&apos;t bound to a wallet yet
+              </p>
+              <p className="text-xs text-muted max-w-md mx-auto">
+                Bind {company.name}&apos;s wallet (Access ID + Token) to start
+                pulling its 6 sub-platforms. Until then the totals show 0.
+              </p>
             </div>
           )}
         </>
