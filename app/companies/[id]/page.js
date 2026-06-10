@@ -73,7 +73,6 @@ export default function CompanyDetailPage() {
   const [bcbRangeElapsedMs, setBcbRangeElapsedMs] = useState(0);
 
   const company = getCompany(params.id);
-  const isBcbParent = company?.walletSource === "BCB_TOTAL";
   const hasDateRange = !!(dateRange.from && dateRange.to);
 
   // Triggered by DateRangeFilter's Submit button. Clears any old result
@@ -132,19 +131,21 @@ export default function CompanyDetailPage() {
     );
   }
 
-  // Extract the wallet ID this company is bound to (BCB / V12MY / …).
-  // Then filter bcbPlatforms to only THIS wallet's 6 sub-platforms.
-  const walletId = isBcbParent
-    ? (company.walletSource || "").replace(/_TOTAL$/, "") || "BCB"
+  // A "wallet-linked" company is one bound to a full wallet (suffix _TOTAL).
+  // Companies without _TOTAL (plain "BVBX", "X44", …) are placeholders
+  // that haven't been bound yet — they show empty stats, never aggregated.
+  const isWalletLinked = !!company.walletSource && company.walletSource.endsWith("_TOTAL");
+  const walletId = isWalletLinked
+    ? company.walletSource.replace(/_TOTAL$/, "")
     : null;
-  const walletPlatforms = isBcbParent
+  const walletPlatforms = isWalletLinked
     ? bcbPlatforms.filter((p) => (p.wallet || "BCB") === walletId)
-    : bcbPlatforms;
+    : [];
 
   // BCB top stats: if a date range is set + the range query is loaded, use that.
   // Otherwise show the lifetime numbers from this wallet's platforms.
   let received;
-  if (isBcbParent && bcbRange?.total) {
+  if (isWalletLinked && bcbRange?.total) {
     const t = bcbRange.total;
     received = {
       members: t.depositingMembers,
@@ -152,7 +153,7 @@ export default function CompanyDetailPage() {
       withdraw: Math.round(t.totalWithdraw),
       net: Math.round(t.net),
     };
-  } else if (isBcbParent) {
+  } else if (isWalletLinked) {
     received = getCompanyStats(company, dateRange);
   } else {
     received = getReceivedStats(company, dateRange);
@@ -161,7 +162,7 @@ export default function CompanyDetailPage() {
   const otherCompanies = companies.filter((c) => c.id !== company.id);
 
   // Sub-platforms table — range overrides lifetime when loaded
-  const platformsForTable = isBcbParent && bcbRange?.platforms
+  const platformsForTable = isWalletLinked && bcbRange?.platforms
     ? bcbRange.platforms.map((p) => {
         const seed = walletPlatforms.find((bp) => bp.name === p.name);
         return {
@@ -217,11 +218,11 @@ export default function CompanyDetailPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <ViewModeToggle value={viewMode} onChange={setViewMode} />
         <div className="flex items-center gap-3">
-          {isBcbParent && <BcbSyncButton walletId={walletId} />}
+          {isWalletLinked && <BcbSyncButton walletId={walletId} />}
           <DateRangeFilter
             value={dateRange}
             onChange={setDateRange}
-            onSubmit={isBcbParent ? runBcbRangeQuery : undefined}
+            onSubmit={isWalletLinked ? runBcbRangeQuery : undefined}
             submitting={bcbRangeLoading}
             submitLabel="Apply date filter"
           />
@@ -230,7 +231,7 @@ export default function CompanyDetailPage() {
 
       {/* BCB range error only — success/loading are reflected in the
           date filter trigger button (compact, less ugly). */}
-      {isBcbParent && hasDateRange && bcbRangeError && (
+      {isWalletLinked && hasDateRange && bcbRangeError && (
         <div className="px-3.5 py-2 rounded-md text-xs bg-rose-500/10 border border-rose-500/30 text-rose-300">
           {bcbRangeError}
         </div>
@@ -256,7 +257,7 @@ export default function CompanyDetailPage() {
           {/* Sub-platforms — for BCB, this is its wallet's 6 sub-platforms with
               live data + editable start dates. For other companies, this is the
               legacy "Other Companies" list (empty until each is bound). */}
-          {isBcbParent ? (
+          {isWalletLinked ? (
             <BcbSubPlatformsTable
               platforms={platformsForTable}
               canEdit={canEdit}
@@ -321,7 +322,7 @@ export default function CompanyDetailPage() {
           )}
         </>
       ) : (
-        isBcbParent ? (
+        isWalletLinked ? (
           <BcbDailyReport walletId={walletId} />
         ) : (
           <DailyEntryTable company={company} dateRange={dateRange} />

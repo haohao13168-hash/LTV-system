@@ -38,13 +38,12 @@ export default function DashboardPage() {
   // True if any company is wallet-linked → show the BCB refresh button in header
   const anyWalletLinked = companies.some((c) => c.walletSource);
 
-  // Dashboard total = sum of "top-level" companies only.
-  // For BCB structure: include the BCB parent (walletSource='BCB_TOTAL') but skip
-  // the individual platforms, otherwise we'd double-count (BCB already aggregates
-  // V12MY + BVBX + …). Non-wallet companies are always included.
+  // Dashboard total = sum of all wallet-bound companies (suffix _TOTAL)
+  // plus any manual / daily-entry companies. Platform-level placeholders
+  // ("BVBX", "X44" without _TOTAL) are skipped so they never contribute.
   const totals = companies.reduce(
     (acc, c) => {
-      if (c.walletSource && c.walletSource !== "BCB_TOTAL") return acc;
+      if (c.walletSource && !c.walletSource.endsWith("_TOTAL")) return acc;
       const s = getCompanyStats(c, dateRange);
       return {
         members: acc.members + s.members,
