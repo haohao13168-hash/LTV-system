@@ -39,7 +39,7 @@ function IconRefresh({ className = "h-4 w-4", spinning = false }) {
   );
 }
 
-export default function BcbSyncButton({ size = "sm" }) {
+export default function BcbSyncButton({ size = "sm", walletId = "BCB" }) {
   const { bcbLastSyncedAt, bcbSyncing, syncBcbNow } = useStore();
   const { currentUser } = useAuth();
   const canEdit = can(currentUser, "editData");
@@ -56,7 +56,7 @@ export default function BcbSyncButton({ size = "sm" }) {
 
   const onClick = async () => {
     setFeedback(null);
-    const r = await syncBcbNow();
+    const r = await syncBcbNow(walletId);
     if (r?.error) {
       setFeedback({ type: "error", text: r.error });
     } else {

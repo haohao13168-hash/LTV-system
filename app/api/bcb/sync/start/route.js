@@ -7,7 +7,7 @@ import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
-export async function POST() {
+export async function POST(req) {
   const url = process.env.DROPLET_SYNC_URL;
   const apiKey = process.env.DROPLET_SYNC_API_KEY;
   if (!url || !apiKey) {
@@ -17,12 +17,17 @@ export async function POST() {
     );
   }
 
+  let body;
+  try { body = await req.json(); } catch { body = {}; }
+  const wallet = body?.wallet || "BCB";
+
   const startUrl = url.replace(/\/sync\/?$/, "/sync/start");
 
   try {
     const upstream = await fetch(startUrl, {
       method: "POST",
       headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet }),
       signal: AbortSignal.timeout(8000),
     });
     const text = await upstream.text();

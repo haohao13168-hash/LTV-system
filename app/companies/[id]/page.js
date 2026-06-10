@@ -89,7 +89,7 @@ export default function CompanyDetailPage() {
     setBcbRangeError(null);
     setBcbRangeElapsedMs(0);
     setBcbRangeLoading(true);
-    const r = await fetchBcbRange(range.from, range.to, ({ elapsedMs }) => {
+    const r = await fetchBcbRange(walletId, range.from, range.to, ({ elapsedMs }) => {
       setBcbRangeElapsedMs(elapsedMs);
     });
     if (r?.error) setBcbRangeError(r.error);
@@ -132,8 +132,17 @@ export default function CompanyDetailPage() {
     );
   }
 
+  // Extract the wallet ID this company is bound to (BCB / V12MY / …).
+  // Then filter bcbPlatforms to only THIS wallet's 6 sub-platforms.
+  const walletId = isBcbParent
+    ? (company.walletSource || "").replace(/_TOTAL$/, "") || "BCB"
+    : null;
+  const walletPlatforms = isBcbParent
+    ? bcbPlatforms.filter((p) => (p.wallet || "BCB") === walletId)
+    : bcbPlatforms;
+
   // BCB top stats: if a date range is set + the range query is loaded, use that.
-  // Otherwise show the lifetime numbers from bcb_platforms.
+  // Otherwise show the lifetime numbers from this wallet's platforms.
   let received;
   if (isBcbParent && bcbRange?.total) {
     const t = bcbRange.total;
@@ -151,10 +160,10 @@ export default function CompanyDetailPage() {
   const perMember = received.members > 0 ? received.net / received.members : 0;
   const otherCompanies = companies.filter((c) => c.id !== company.id);
 
-  // For the sub-platforms table — same logic, range overrides lifetime
+  // Sub-platforms table — range overrides lifetime when loaded
   const platformsForTable = isBcbParent && bcbRange?.platforms
     ? bcbRange.platforms.map((p) => {
-        const seed = bcbPlatforms.find((bp) => bp.name === p.name);
+        const seed = walletPlatforms.find((bp) => bp.name === p.name);
         return {
           ...seed,
           depositing_members: p.depositingMembers,
@@ -162,7 +171,7 @@ export default function CompanyDetailPage() {
           total_withdraw: p.totalWithdraw,
         };
       })
-    : bcbPlatforms;
+    : walletPlatforms;
 
   return (
     <div className="space-y-6">
@@ -208,7 +217,7 @@ export default function CompanyDetailPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <ViewModeToggle value={viewMode} onChange={setViewMode} />
         <div className="flex items-center gap-3">
-          {isBcbParent && <BcbSyncButton />}
+          {isBcbParent && <BcbSyncButton walletId={walletId} />}
           <DateRangeFilter
             value={dateRange}
             onChange={setDateRange}
@@ -313,7 +322,7 @@ export default function CompanyDetailPage() {
         </>
       ) : (
         isBcbParent ? (
-          <BcbDailyReport />
+          <BcbDailyReport walletId={walletId} />
         ) : (
           <DailyEntryTable company={company} dateRange={dateRange} />
         )

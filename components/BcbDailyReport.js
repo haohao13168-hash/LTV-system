@@ -39,8 +39,10 @@ function IconRefresh({ className = "h-4 w-4", spinning = false }) {
   );
 }
 
-export default function BcbDailyReport() {
+export default function BcbDailyReport({ walletId = "BCB" }) {
   const { bcbPlatforms, syncBcbNow, bcbSyncing } = useStore();
+  // Only count THIS wallet's platforms for the "today live" row
+  const walletPlatforms = bcbPlatforms.filter((p) => (p.wallet || "BCB") === walletId);
   const { currentUser } = useAuth();
   const canRefresh = can(currentUser, "editData");
 
@@ -54,13 +56,14 @@ export default function BcbDailyReport() {
     const { data, error: e } = await supabase
       .from("bcb_lifetime_snapshots")
       .select("date, platform_name, depositing_members, total_deposit, total_withdraw")
+      .eq("wallet", walletId)
       .order("date", { ascending: false });
     if (e) setError(e.message);
     else setSnapshots(data || []);
     setLoading(false);
   };
 
-  useEffect(() => { loadSnapshots(); }, []);
+  useEffect(() => { loadSnapshots(); }, [walletId]);
 
   // Aggregate snapshots: one row per date with summed totals across platforms
   const dailyLifetimes = useMemo(() => {
@@ -78,9 +81,9 @@ export default function BcbDailyReport() {
     return Array.from(byDate.values()).sort((a, b) => b.date.localeCompare(a.date));
   }, [snapshots]);
 
-  // Compute today's live lifetime totals from bcb_platforms
+  // Compute today's live lifetime totals (this wallet's platforms only)
   const todayLifetime = useMemo(() => {
-    return bcbPlatforms.reduce(
+    return walletPlatforms.reduce(
       (acc, p) => ({
         members:  acc.members  + (p.depositing_members || 0),
         deposit:  acc.deposit  + (parseFloat(p.total_deposit)  || 0),
@@ -88,7 +91,7 @@ export default function BcbDailyReport() {
       }),
       { members: 0, deposit: 0, withdraw: 0 }
     );
-  }, [bcbPlatforms]);
+  }, [walletPlatforms]);
 
   // Derive per-day activity = snapshot[D] - snapshot[D-1]
   // Today's activity = today's live lifetime - yesterday's snapshot
@@ -118,7 +121,7 @@ export default function BcbDailyReport() {
   }, [dailyLifetimes, todayLifetime]);
 
   const refresh = async () => {
-    await syncBcbNow();
+    await syncBcbNow(walletId);
     await loadSnapshots();
   };
 

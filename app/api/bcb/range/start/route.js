@@ -21,7 +21,7 @@ export async function POST(req) {
   try { body = await req.json(); }
   catch { return NextResponse.json({ error: "Body must be JSON" }, { status: 400 }); }
 
-  const { from, to } = body || {};
+  const { wallet = "BCB", from, to } = body || {};
   const dateRe = /^\d{4}-\d{2}-\d{2}$/;
   if (!from || !to || !dateRe.test(from) || !dateRe.test(to)) {
     return NextResponse.json(
@@ -39,7 +39,7 @@ export async function POST(req) {
         "X-API-Key": apiKey,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ from, to }),
+      body: JSON.stringify({ wallet, from, to }),
       signal: AbortSignal.timeout(8000),
     });
     const text = await upstream.text();
