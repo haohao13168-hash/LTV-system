@@ -13,17 +13,7 @@ const { createClient } = require("@supabase/supabase-js");
 // this forces IPv4 so the BCB whitelist check matches.
 dns.setDefaultResultOrder("ipv4first");
 
-const {
-  BCB_API_BASE_URL,
-  BCB_ACCESS_ID,
-  BCB_ACCESS_TOKEN,
-  SUPABASE_URL,
-  SUPABASE_SERVICE_KEY,
-} = process.env;
-
-if (!BCB_API_BASE_URL || !BCB_ACCESS_ID || !BCB_ACCESS_TOKEN) {
-  throw new Error("Missing BCB_API_BASE_URL / BCB_ACCESS_ID / BCB_ACCESS_TOKEN");
-}
+const { SUPABASE_URL, SUPABASE_SERVICE_KEY } = process.env;
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   throw new Error("Missing SUPABASE_URL / SUPABASE_SERVICE_KEY");
 }
@@ -35,7 +25,34 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   realtime: { transport: ws },
 });
 
-const ENDPOINT = `${BCB_API_BASE_URL.replace(/\/$/, "")}/api/v1/index.php`;
+// ─── Wallets ───────────────────────────────────────────────────
+// Each entry holds the credentials + API endpoint for one wallet system.
+// To add a new wallet, drop in its 3 env vars and add it here.
+const WALLETS = {
+  BCB: {
+    baseUrl: process.env.BCB_API_BASE_URL,
+    accessId: process.env.BCB_ACCESS_ID,
+    accessToken: process.env.BCB_ACCESS_TOKEN,
+  },
+  V12MY: {
+    baseUrl: process.env.V12MY_API_BASE_URL,
+    accessId: process.env.V12MY_ACCESS_ID,
+    accessToken: process.env.V12MY_ACCESS_TOKEN,
+  },
+};
+function listEnabledWallets() {
+  return Object.entries(WALLETS)
+    .filter(([_, w]) => w.baseUrl && w.accessId && w.accessToken)
+    .map(([id]) => id);
+}
+function walletEndpoint(walletId) {
+  const w = WALLETS[walletId];
+  if (!w) throw new Error(`Unknown wallet: ${walletId}`);
+  if (!w.baseUrl || !w.accessId || !w.accessToken) {
+    throw new Error(`Wallet ${walletId} not configured (missing env vars)`);
+  }
+  return `${w.baseUrl.replace(/\/$/, "")}/api/v1/index.php`;
+}
 
 // ─── Tunables ──────────────────────────────────────────────────
 const PER_USER_CONCURRENCY = 40;          // per-platform concurrent API calls
@@ -51,18 +68,22 @@ function incrementRangeJobs() { rangeJobsRunning++; }
 function decrementRangeJobs() { rangeJobsRunning = Math.max(0, rangeJobsRunning - 1); }
 function isRangeJobRunning() { return rangeJobsRunning > 0; }
 
-// ─── BCB API call ──────────────────────────────────────────────
-async function bcb(module, extras = {}) {
+// ─── Wallet API call ───────────────────────────────────────────
+// Goes to the right backoffice endpoint with the right credentials based
+// on walletId. Same retry behaviour for all wallets.
+async function api(walletId, module, extras = {}) {
+  const w = WALLETS[walletId];
+  const endpoint = walletEndpoint(walletId);
   const form = new FormData();
   form.append("module", module);
-  form.append("accessId", BCB_ACCESS_ID);
-  form.append("accessToken", BCB_ACCESS_TOKEN);
+  form.append("accessId", w.accessId);
+  form.append("accessToken", w.accessToken);
   for (const [k, v] of Object.entries(extras)) form.append(k, String(v));
 
   let lastErr;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await fetch(ENDPOINT, { method: "POST", body: form });
+      const res = await fetch(endpoint, { method: "POST", body: form });
       const text = await res.text();
       return JSON.parse(text);
     } catch (e) {
@@ -70,7 +91,13 @@ async function bcb(module, extras = {}) {
       if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * attempt));
     }
   }
-  throw new Error(`BCB ${module} failed after 3 retries: ${lastErr.message}`);
+  throw new Error(`${walletId} ${module} failed after 3 retries: ${lastErr.message}`);
+}
+
+// Back-compat shim — the old code base called bcb() everywhere with no
+// wallet param. Default to BCB so anything not yet migrated keeps working.
+async function bcb(module, extras = {}) {
+  return api("BCB", module, extras);
 }
 
 // ─── Bounded-concurrency map ────────────────────────────────────
@@ -92,9 +119,9 @@ async function withConcurrency(items, fn, concurrency = PER_USER_CONCURRENCY) {
 }
 
 // ─── Per-user lifetime / range queries ──────────────────────────
-async function getUserDepositInRange(userId, sDate, eDate) {
+async function getUserDepositInRange(walletId, userId, sDate, eDate) {
   try {
-    const r = await bcb("/transactions/getAllTransactions", {
+    const r = await api(walletId, "/transactions/getAllTransactions", {
       userId: String(userId),
       type: "DEPOSIT",
       status: "COMPLETED",
@@ -106,9 +133,9 @@ async function getUserDepositInRange(userId, sDate, eDate) {
   } catch (e) { return 0; }
 }
 
-async function getUserWithdrawInRange(userId, sDate, eDate) {
+async function getUserWithdrawInRange(walletId, userId, sDate, eDate) {
   try {
-    const r = await bcb("/transactions/getAllTransactions", {
+    const r = await api(walletId, "/transactions/getAllTransactions", {
       userId: String(userId),
       type: "WITHDRAW",
       status: "COMPLETED",
@@ -120,21 +147,22 @@ async function getUserWithdrawInRange(userId, sDate, eDate) {
   } catch (e) { return 0; }
 }
 
-// ─── User list cache ───────────────────────────────────────────
-// platformName → { users: [...], at: epochMs }
+// ─── User list cache (keyed by wallet + platform) ──────────────
+// "WALLET:PlatformName" → { users: [...], at: epochMs }
 const userCache = new Map();
+const userCacheKey = (walletId, platform) => `${walletId}:${platform.name}`;
 
-async function fetchAllUsers(platform) {
+async function fetchAllUsers(walletId, platform) {
   const allUsers = [];
   let page = 1;
   let totalPages = null;
   while (true) {
-    const r = await bcb("/users/getAllUsers", {
+    const r = await api(walletId, "/users/getAllUsers", {
       agent: platform.upline_code,
       pageIndex: page,
     });
     if (r.status !== "SUCCESS") {
-      throw new Error(`${platform.name} page ${page}: ${r.data?.message || "unknown"}`);
+      throw new Error(`${walletId}/${platform.name} page ${page}: ${r.data?.message || "unknown"}`);
     }
     const batch = r.data?.users || [];
     allUsers.push(...batch);
@@ -145,13 +173,14 @@ async function fetchAllUsers(platform) {
   return allUsers;
 }
 
-async function getCachedUsers(platform, { forceRefresh = false } = {}) {
-  const cached = userCache.get(platform.name);
+async function getCachedUsers(walletId, platform, { forceRefresh = false } = {}) {
+  const key = userCacheKey(walletId, platform);
+  const cached = userCache.get(key);
   if (!forceRefresh && cached && (Date.now() - cached.at) < USER_CACHE_TTL_MS) {
     return cached.users;
   }
-  const users = await fetchAllUsers(platform);
-  userCache.set(platform.name, { users, at: Date.now() });
+  const users = await fetchAllUsers(walletId, platform);
+  userCache.set(key, { users, at: Date.now() });
   return users;
 }
 
@@ -159,11 +188,11 @@ async function getCachedUsers(platform, { forceRefresh = false } = {}) {
 // Only depositors (lifetimeDeposit > 0) are queried for withdraws — per the
 // user's spec, non-depositors don't matter (they can't withdraw what they
 // never put in). This cuts withdraw calls from ~24K to ~4K.
-async function pullPlatformLifetime(platform) {
+async function pullPlatformLifetime(walletId, platform) {
   // Use cached user list if fresh (up to 1h old) — saves ~60-90s per sync
   // by skipping the ~465-page user fetch. Cron runs every 10 min so users
   // get refreshed naturally every 6th run.
-  const allUsers = await getCachedUsers(platform);
+  const allUsers = await getCachedUsers(walletId, platform);
 
   // Deposit: free from getAllUsers response
   const depositors = allUsers.filter((u) => parseFloat(u.lifetimeDeposit) > 0);
@@ -172,14 +201,14 @@ async function pullPlatformLifetime(platform) {
   );
 
   // Withdraw: query ONLY depositors (not all users)
-  console.log(`  [${platform.name}] computing withdraw for ${depositors.length} depositors (was ${allUsers.length}, conc=${PER_USER_CONCURRENCY})…`);
+  console.log(`  [${walletId}/${platform.name}] computing withdraw for ${depositors.length} depositors (was ${allUsers.length}, conc=${PER_USER_CONCURRENCY})…`);
   const start = Date.now();
   const userWithdraws = await withConcurrency(
     depositors,
-    (u) => getUserWithdrawInRange(u.id, WIDE_S_DATE, WIDE_E_DATE)
+    (u) => getUserWithdrawInRange(walletId, u.id, WIDE_S_DATE, WIDE_E_DATE)
   );
   const totalWithdraw = userWithdraws.reduce((s, w) => s + w, 0);
-  console.log(`  [${platform.name}] done in ${((Date.now() - start) / 1000).toFixed(1)}s — RM ${totalWithdraw.toFixed(2)} wd`);
+  console.log(`  [${walletId}/${platform.name}] done in ${((Date.now() - start) / 1000).toFixed(1)}s — RM ${totalWithdraw.toFixed(2)} wd`);
 
   return {
     name: platform.name,
@@ -194,18 +223,18 @@ async function pullPlatformLifetime(platform) {
 // We only iterate users who have any lifetime deposit. Non-depositors are
 // ignored everywhere (per user requirement) — they can't have deposited
 // inside the range either, and they can't withdraw what they never put in.
-async function pullPlatformRange(platform, sDate, eDate) {
-  const allUsers = await getCachedUsers(platform); // use cache if fresh
+async function pullPlatformRange(walletId, platform, sDate, eDate) {
+  const allUsers = await getCachedUsers(walletId, platform);
   const depositors = allUsers.filter((u) => parseFloat(u.lifetimeDeposit) > 0);
 
-  console.log(`  [${platform.name}] range: ${depositors.length} ever-depositors (out of ${allUsers.length} users)…`);
+  console.log(`  [${walletId}/${platform.name}] range: ${depositors.length} ever-depositors (out of ${allUsers.length} users)…`);
   const start = Date.now();
 
   // Fire dep + wd in parallel per depositor.
   const perUser = await withConcurrency(depositors, async (u) => {
     const [dep, wd] = await Promise.all([
-      getUserDepositInRange(u.id, sDate, eDate),
-      getUserWithdrawInRange(u.id, sDate, eDate),
+      getUserDepositInRange(walletId, u.id, sDate, eDate),
+      getUserWithdrawInRange(walletId, u.id, sDate, eDate),
     ]);
     return { dep, wd };
   });
@@ -214,7 +243,7 @@ async function pullPlatformRange(platform, sDate, eDate) {
   const totalWithdraw = perUser.reduce((s, r) => s + r.wd, 0);
   const depositingMembers = perUser.filter((r) => r.dep > 0).length;
 
-  console.log(`  [${platform.name}] range done in ${((Date.now() - start) / 1000).toFixed(1)}s — ${depositingMembers} dep, RM ${totalDeposit.toFixed(2)} / ${totalWithdraw.toFixed(2)}`);
+  console.log(`  [${walletId}/${platform.name}] range done in ${((Date.now() - start) / 1000).toFixed(1)}s — ${depositingMembers} dep, RM ${totalDeposit.toFixed(2)} / ${totalWithdraw.toFixed(2)}`);
 
   return {
     name: platform.name,
@@ -226,14 +255,14 @@ async function pullPlatformRange(platform, sDate, eDate) {
 }
 
 // ─── Full lifetime sync — writes to Supabase ───────────────────
-async function runSync(trigger = "manual") {
+async function runSync(walletId, trigger = "manual") {
+  if (!walletId) throw new Error("runSync requires walletId");
   const startTime = Date.now();
-  console.log(`[${new Date().toISOString()}] Sync started (${trigger})`);
+  console.log(`[${new Date().toISOString()}] ${walletId} sync started (${trigger})`);
 
-  // Create log row
   const { data: logRow, error: logErr } = await supabase
     .from("bcb_sync_log")
-    .insert({ status: "running", trigger_source: trigger })
+    .insert({ wallet: walletId, status: "running", trigger_source: trigger })
     .select().single();
   if (logErr) throw new Error(`Failed to create sync log row: ${logErr.message}`);
   const logId = logRow.id;
@@ -242,15 +271,16 @@ async function runSync(trigger = "manual") {
     const { data: platforms, error: pErr } = await supabase
       .from("bcb_platforms")
       .select("id, name, upline_code, display_order")
+      .eq("wallet", walletId)
       .order("display_order");
     if (pErr) throw new Error(`Failed to read platforms: ${pErr.message}`);
     if (!platforms || platforms.length === 0) {
-      throw new Error("No platforms configured in bcb_platforms table");
+      throw new Error(`No platforms configured for wallet ${walletId}`);
     }
 
     const results = await Promise.all(
       platforms.map((p) =>
-        pullPlatformLifetime(p).then(
+        pullPlatformLifetime(walletId, p).then(
           (r) => ({ ok: true, ...r }),
           (e) => ({ ok: false, name: p.name, error: e.message })
         )
@@ -275,6 +305,7 @@ async function runSync(trigger = "manual") {
           last_synced_at: now,
           updated_at: now,
         })
+        .eq("wallet", walletId)
         .eq("name", r.name);
       if (error) throw new Error(`Failed to update ${r.name}: ${error.message}`);
     }
@@ -304,10 +335,10 @@ async function runSync(trigger = "manual") {
       .eq("id", logId);
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[${new Date().toISOString()}] Sync DONE in ${elapsed}s — ${totalDepositing} dep, RM ${totalDeposit.toFixed(2)} / ${totalWithdraw.toFixed(2)}`);
+    console.log(`[${new Date().toISOString()}] ${walletId} sync DONE in ${elapsed}s — ${totalDepositing} dep, RM ${totalDeposit.toFixed(2)} / ${totalWithdraw.toFixed(2)}`);
 
     return {
-      ok: true,
+      ok: true, wallet: walletId,
       duration_ms: Date.now() - startTime,
       platforms_synced: successful.length,
       total_downline: totalDownline,
@@ -317,7 +348,7 @@ async function runSync(trigger = "manual") {
       failed: failed.map((f) => ({ name: f.name, error: f.error })),
     };
   } catch (e) {
-    console.error(`[${new Date().toISOString()}] Sync FAILED:`, e.message);
+    console.error(`[${new Date().toISOString()}] ${walletId} sync FAILED:`, e.message);
     await supabase
       .from("bcb_sync_log")
       .update({
@@ -329,6 +360,21 @@ async function runSync(trigger = "manual") {
       .eq("id", logId);
     throw e;
   }
+}
+
+// Convenience — sync every wallet that has full credentials. Runs them
+// sequentially so they don't slam the BCB / V12MY APIs at the same time.
+async function runAllWalletsSync(trigger = "manual") {
+  const wallets = listEnabledWallets();
+  const results = [];
+  for (const walletId of wallets) {
+    try {
+      results.push(await runSync(walletId, trigger));
+    } catch (e) {
+      results.push({ ok: false, wallet: walletId, error: e.message });
+    }
+  }
+  return { ok: true, wallets: results };
 }
 
 // ─── Async job state ──────────────────────────────────────────
@@ -380,25 +426,24 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// ─── Range result cache ───────────────────────────────────────
-// In-memory cache keyed by "from|to". 15-min TTL so a recently-pulled
-// range comes back instantly. Cron pre-computes common ranges below.
+// ─── Range result cache (keyed by wallet too) ──────────────────
+// "WALLET|from|to" → { data, at }
 const RANGE_CACHE_TTL_MS = 15 * 60 * 1000;
-const rangeCache = new Map(); // "from|to" → { data, at }
+const rangeCache = new Map();
+const rangeKey = (walletId, from, to) => `${walletId}|${from}|${to}`;
 
-function getCachedRange(from, to) {
-  const k = `${from}|${to}`;
-  const c = rangeCache.get(k);
+function getCachedRange(walletId, from, to) {
+  const c = rangeCache.get(rangeKey(walletId, from, to));
   if (!c) return null;
   if ((Date.now() - c.at) > RANGE_CACHE_TTL_MS) {
-    rangeCache.delete(k);
+    rangeCache.delete(rangeKey(walletId, from, to));
     return null;
   }
   return { ...c.data, fromCache: true, cacheAgeMs: Date.now() - c.at };
 }
 
-function setCachedRange(from, to, data) {
-  rangeCache.set(`${from}|${to}`, { data, at: Date.now() });
+function setCachedRange(walletId, from, to, data) {
+  rangeCache.set(rangeKey(walletId, from, to), { data, at: Date.now() });
 }
 
 // Compute common date ranges to pre-fetch in the background so user
@@ -439,21 +484,23 @@ function computeCommonRanges() {
 
 // ─── Range query — returns data without touching DB ────────────
 // Takes `from` and `to` as YYYY-MM-DD strings.
-async function runRangeSync(from, to) {
+async function runRangeSync(walletId, from, to) {
+  if (!walletId) throw new Error("runRangeSync requires walletId");
   const startTime = Date.now();
   const sDate = `${from} 00:00:00`;
   const eDate = `${to} 23:59:59`;
-  console.log(`[${new Date().toISOString()}] Range query ${sDate} → ${eDate}`);
+  console.log(`[${new Date().toISOString()}] ${walletId} range query ${sDate} → ${eDate}`);
 
   const { data: platforms, error: pErr } = await supabase
     .from("bcb_platforms")
     .select("id, name, upline_code, display_order")
+    .eq("wallet", walletId)
     .order("display_order");
   if (pErr) throw new Error(`Failed to read platforms: ${pErr.message}`);
 
   const results = await Promise.all(
     platforms.map((p) =>
-      pullPlatformRange(p, sDate, eDate).then(
+      pullPlatformRange(walletId, p, sDate, eDate).then(
         (r) => ({ ok: true, ...r }),
         (e) => ({ ok: false, name: p.name, error: e.message })
       )
@@ -471,10 +518,11 @@ async function runRangeSync(from, to) {
   total.net = total.totalDeposit - total.totalWithdraw;
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log(`[${new Date().toISOString()}] Range done in ${elapsed}s`);
+  console.log(`[${new Date().toISOString()}] ${walletId} range done in ${elapsed}s`);
 
   return {
     ok: true,
+    wallet: walletId,
     from, to,
     duration_ms: Date.now() - startTime,
     platforms: successful.map(({ ok, ...rest }) => rest),
@@ -484,22 +532,19 @@ async function runRangeSync(from, to) {
 }
 
 // Cache-aware wrapper — checks cache first, falls back to runRangeSync.
-async function runRangeSyncCached(from, to) {
-  // 1. In-memory cache (last 15 min)
-  const cached = getCachedRange(from, to);
+async function runRangeSyncCached(walletId, from, to) {
+  const cached = getCachedRange(walletId, from, to);
   if (cached) {
-    console.log(`[${new Date().toISOString()}] Range cache HIT ${from}→${to} (age ${Math.round(cached.cacheAgeMs / 1000)}s)`);
+    console.log(`[${new Date().toISOString()}] ${walletId} range cache HIT ${from}→${to} (age ${Math.round(cached.cacheAgeMs / 1000)}s)`);
     return cached;
   }
-  // 2. Try DB snapshots (instant if covered)
-  const fromSnap = await tryRangeFromSnapshots(from, to);
+  const fromSnap = await tryRangeFromSnapshots(walletId, from, to);
   if (fromSnap) {
-    setCachedRange(from, to, fromSnap);
+    setCachedRange(walletId, from, to, fromSnap);
     return { ...fromSnap, fromCache: false };
   }
-  // 3. Fall back to live BCB API query
-  const fresh = await runRangeSync(from, to);
-  setCachedRange(from, to, fresh);
+  const fresh = await runRangeSync(walletId, from, to);
+  setCachedRange(walletId, from, to, fresh);
   return { ...fresh, fromCache: false };
 }
 
@@ -513,21 +558,17 @@ function addDaysISO(dateStr, n) {
   return fmtDateOnly(d);
 }
 
-async function tryRangeFromSnapshots(from, to) {
+async function tryRangeFromSnapshots(walletId, from, to) {
   const today = fmtDateOnly(new Date());
   const fromMinus1 = addDaysISO(from, -1);
 
-  // We need lifetime totals at end-of-day `to` and end-of-day `fromMinus1`.
-  // For `to` = today, we use bcb_platforms (current live lifetime totals).
-  // For other dates, we look up bcb_lifetime_snapshots.
-
-  // Fetch "to" lifetimes
+  // Fetch "to" lifetimes (live for today, snapshot otherwise)
   let toRows;
   if (to >= today) {
-    // Use current live data from bcb_platforms (most recent sync, max 10min old)
     const { data, error } = await supabase
       .from("bcb_platforms")
       .select("name, depositing_members, total_deposit, total_withdraw, total_downline, display_order")
+      .eq("wallet", walletId)
       .order("display_order");
     if (error || !data || data.length === 0) return null;
     toRows = data.map((r) => ({
@@ -541,6 +582,7 @@ async function tryRangeFromSnapshots(from, to) {
     const { data, error } = await supabase
       .from("bcb_lifetime_snapshots")
       .select("*")
+      .eq("wallet", walletId)
       .eq("date", to);
     if (error || !data || data.length === 0) return null;
     toRows = data.map((r) => ({
@@ -556,6 +598,7 @@ async function tryRangeFromSnapshots(from, to) {
   const { data: fromMinus1Rows, error: e2 } = await supabase
     .from("bcb_lifetime_snapshots")
     .select("*")
+    .eq("wallet", walletId)
     .eq("date", fromMinus1);
   if (e2) return null;
   const fromMap = new Map();
@@ -598,17 +641,18 @@ async function tryRangeFromSnapshots(from, to) {
 // For each platform, query each current depositor's lifetime deposit AND
 // withdraw with eDate = end of `date`. Sum, store in bcb_lifetime_snapshots.
 // Skips if a row already exists for (date, platform).
-async function takeLifetimeSnapshotForDate(date, { force = false } = {}) {
+async function takeLifetimeSnapshotForDate(walletId, date, { force = false } = {}) {
+  if (!walletId) throw new Error("takeLifetimeSnapshotForDate requires walletId");
   const sDate = WIDE_S_DATE;
   const eDate = `${date} 23:59:59`;
   const computedAt = new Date().toISOString();
 
-  // Check existing rows so we can skip already-done platforms
   let existing = new Set();
   if (!force) {
     const { data: rows } = await supabase
       .from("bcb_lifetime_snapshots")
       .select("platform_name")
+      .eq("wallet", walletId)
       .eq("date", date);
     existing = new Set((rows || []).map((r) => r.platform_name));
   }
@@ -616,25 +660,25 @@ async function takeLifetimeSnapshotForDate(date, { force = false } = {}) {
   const { data: platforms, error: pErr } = await supabase
     .from("bcb_platforms")
     .select("id, name, upline_code, display_order")
+    .eq("wallet", walletId)
     .order("display_order");
   if (pErr) throw new Error(`Failed to read platforms: ${pErr.message}`);
 
   const todo = platforms.filter((p) => !existing.has(p.name));
-  if (todo.length === 0) return { date, skipped: true, platforms: 0 };
+  if (todo.length === 0) return { wallet: walletId, date, skipped: true, platforms: 0 };
 
-  console.log(`[snapshot ${date}] computing ${todo.length} platform(s)…`);
+  console.log(`[snapshot ${walletId}/${date}] computing ${todo.length} platform(s)…`);
   const startedAt = Date.now();
 
   const results = await Promise.all(
     todo.map(async (p) => {
-      const allUsers = await getCachedUsers(p);
+      const allUsers = await getCachedUsers(walletId, p);
       const depositors = allUsers.filter((u) => parseFloat(u.lifetimeDeposit) > 0);
 
-      // Per depositor, query deposit + withdraw up to end-of-day `date`
       const perUser = await withConcurrency(depositors, async (u) => {
         const [dep, wd] = await Promise.all([
-          getUserDepositInRange(u.id, sDate, eDate),
-          getUserWithdrawInRange(u.id, sDate, eDate),
+          getUserDepositInRange(walletId, u.id, sDate, eDate),
+          getUserWithdrawInRange(walletId, u.id, sDate, eDate),
         ]);
         return { dep, wd };
       });
@@ -646,6 +690,7 @@ async function takeLifetimeSnapshotForDate(date, { force = false } = {}) {
       const { error: insErr } = await supabase
         .from("bcb_lifetime_snapshots")
         .upsert({
+          wallet: walletId,
           date,
           platform_name: p.name,
           depositing_members: depositingMembers,
@@ -653,15 +698,15 @@ async function takeLifetimeSnapshotForDate(date, { force = false } = {}) {
           total_withdraw: totalWithdraw,
           total_downline: allUsers.length,
           computed_at: computedAt,
-        }, { onConflict: "date,platform_name" });
+        }, { onConflict: "wallet,date,platform_name" });
       if (insErr) throw new Error(`Snapshot upsert failed for ${p.name}: ${insErr.message}`);
 
       return { name: p.name, totalDeposit, totalWithdraw, depositingMembers };
     })
   );
 
-  console.log(`[snapshot ${date}] done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
-  return { date, skipped: false, platforms: results.length, results };
+  console.log(`[snapshot ${walletId}/${date}] done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+  return { wallet: walletId, date, skipped: false, platforms: results.length, results };
 }
 
 // ─── Backfill job ──────────────────────────────────────────────
@@ -671,10 +716,12 @@ async function takeLifetimeSnapshotForDate(date, { force = false } = {}) {
 let backfillRunning = false;
 function isBackfillRunning() { return backfillRunning; }
 
-async function startBackfillJob() {
+async function startBackfillJob(walletId) {
+  if (!walletId) throw new Error("startBackfillJob requires walletId");
   const jobId = randomUUID();
   jobs.set(jobId, {
     status: "running",
+    wallet: walletId,
     startedAt: Date.now(),
     finishedAt: null,
     result: null,
@@ -691,11 +738,13 @@ async function startBackfillJob() {
       const { data: platforms } = await supabase
         .from("bcb_platforms")
         .select("name, start_date")
+        .eq("wallet", walletId)
         .order("display_order");
-      const earliestStart = platforms
+      const earliestStart = (platforms || [])
         .map((p) => p.start_date)
         .filter(Boolean)
         .sort()[0];
+      if (!earliestStart) throw new Error(`No platforms with start_date for wallet ${walletId}`);
 
       const today = fmtDateOnly(new Date());
       const yesterday = addDaysISO(today, -1);
@@ -711,7 +760,7 @@ async function startBackfillJob() {
       if (job) job.totalDays = dates.length;
 
       for (const date of dates) {
-        // Yield to user-initiated range queries — pause until they finish
+        // Yield to user-initiated range queries
         while (isRangeJobRunning()) {
           await new Promise((r) => setTimeout(r, 3000));
         }
@@ -719,18 +768,18 @@ async function startBackfillJob() {
         const j = jobs.get(jobId);
         if (j) j.currentDate = date;
         try {
-          const res = await takeLifetimeSnapshotForDate(date);
+          const res = await takeLifetimeSnapshotForDate(walletId, date);
           const jj = jobs.get(jobId);
           if (jj) {
             if (res.skipped) jj.skippedDays++;
             else jj.doneDays++;
           }
         } catch (e) {
-          console.warn(`Backfill ${date} failed: ${e.message}`);
+          console.warn(`Backfill ${walletId}/${date} failed: ${e.message}`);
         }
       }
 
-      finishJob(jobId, { result: { ok: true, totalDays: dates.length } });
+      finishJob(jobId, { result: { ok: true, wallet: walletId, totalDays: dates.length } });
     } catch (e) {
       finishJob(jobId, { error: e });
     } finally {
@@ -743,64 +792,74 @@ async function startBackfillJob() {
 
 // Pre-compute the common ranges. Designed to be called from a cron.
 // Runs ranges sequentially so we don't overwhelm BCB API.
-async function preComputeCommonRanges() {
+async function preComputeCommonRanges(walletId) {
+  if (!walletId) throw new Error("preComputeCommonRanges requires walletId");
   const ranges = computeCommonRanges();
-  console.log(`[${new Date().toISOString()}] Pre-computing ${ranges.length} ranges…`);
+  console.log(`[${new Date().toISOString()}] ${walletId} pre-computing ${ranges.length} ranges…`);
   const results = [];
   for (const [name, from, to] of ranges) {
     try {
-      // Always recompute (don't use cache) so we get fresh data
-      const fresh = await runRangeSync(from, to);
-      setCachedRange(from, to, fresh);
+      const fresh = await runRangeSync(walletId, from, to);
+      setCachedRange(walletId, from, to, fresh);
       results.push({ name, from, to, ok: true, duration_ms: fresh.duration_ms });
-      console.log(`  ✓ ${name} (${from}→${to}) — ${(fresh.duration_ms / 1000).toFixed(1)}s`);
+      console.log(`  ✓ ${walletId} ${name} (${from}→${to}) — ${(fresh.duration_ms / 1000).toFixed(1)}s`);
     } catch (e) {
       results.push({ name, from, to, ok: false, error: e.message });
-      console.warn(`  ✗ ${name}: ${e.message}`);
+      console.warn(`  ✗ ${walletId} ${name}: ${e.message}`);
     }
   }
   return results;
 }
 
-// Start a range job asynchronously. Returns jobId immediately.
-// The actual work runs in the background; poll getJob(jobId) for progress.
-function startRangeJob(from, to) {
-  // If a fresh cached result exists, return it instantly without a real job
-  const cached = getCachedRange(from, to);
+// Start a range job asynchronously.
+function startRangeJob(walletId, from, to) {
+  if (!walletId) throw new Error("startRangeJob requires walletId");
+  const cached = getCachedRange(walletId, from, to);
   if (cached) {
     const jobId = randomUUID();
     jobs.set(jobId, {
-      status: "done", from, to,
+      status: "done", wallet: walletId, from, to,
       startedAt: Date.now(), finishedAt: Date.now(),
       result: cached, error: null,
     });
     return jobId;
   }
-  const jobId = createRangeJob(from, to);
+  const jobId = randomUUID();
+  jobs.set(jobId, {
+    status: "running", wallet: walletId, from, to,
+    startedAt: Date.now(), finishedAt: null,
+    result: null, error: null,
+  });
   incrementRangeJobs();
-  runRangeSyncCached(from, to)
+  runRangeSyncCached(walletId, from, to)
     .then((result) => finishJob(jobId, { result }))
     .catch((error) => finishJob(jobId, { error }))
     .finally(() => decrementRangeJobs());
   return jobId;
 }
 
-// Start a manual sync job (Refresh button). Same async pattern as range.
-function startSyncJob() {
+// Start a manual sync job (Refresh button).
+function startSyncJob(walletId) {
+  if (!walletId) throw new Error("startSyncJob requires walletId");
   const jobId = randomUUID();
   jobs.set(jobId, {
-    status: "running", from: null, to: null,
+    status: "running", wallet: walletId, from: null, to: null,
     startedAt: Date.now(), finishedAt: null,
     result: null, error: null,
   });
-  runSync("manual")
+  runSync(walletId, "manual")
     .then((result) => finishJob(jobId, { result }))
     .catch((error) => finishJob(jobId, { error }));
   return jobId;
 }
 
 module.exports = {
+  // Wallet config
+  WALLETS,
+  listEnabledWallets,
+  // Sync
   runSync,
+  runAllWalletsSync,
   runRangeSync,
   runRangeSyncCached,
   preComputeCommonRanges,
@@ -813,5 +872,6 @@ module.exports = {
   startBackfillJob,
   addDaysISO,
   fmtDateOnly,
-  bcb,
+  api,
+  bcb, // back-compat
 };

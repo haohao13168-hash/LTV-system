@@ -1,10 +1,13 @@
 // services/bcb-sync/server.js
-// Long-running HTTP service that exposes /sync and /health.
-// Also auto-syncs every SYNC_INTERVAL_MIN minutes (default 10).
+// Long-running HTTP service that drives sync, range queries, and
+// snapshot backfill for ALL wallets (BCB, V12MY, …).
 
 const http = require("http");
 const {
+  WALLETS,
+  listEnabledWallets,
   runSync,
+  runAllWalletsSync,
   runRangeSyncCached,
   preComputeCommonRanges,
   startRangeJob,
@@ -26,27 +29,37 @@ if (!SYNC_API_KEY) {
   process.exit(1);
 }
 
-// ─── State ─────────────────────────────────────────────────────
-let syncInProgress = false;
-let lastSyncResult = null;
-let lastSyncError = null;
+// ─── State per wallet ──────────────────────────────────────────
+const walletState = {};
+for (const w of listEnabledWallets()) {
+  walletState[w] = { syncInProgress: false, lastSyncResult: null, lastSyncError: null };
+}
+let anySyncInProgress = false;
 
-async function safeRunSync(trigger) {
-  if (syncInProgress) {
-    throw new Error("Sync already in progress");
-  }
-  syncInProgress = true;
+async function safeRunSync(walletId, trigger) {
+  const s = walletState[walletId];
+  if (!s) throw new Error(`Wallet ${walletId} not configured`);
+  if (s.syncInProgress) throw new Error(`${walletId} sync already in progress`);
+  s.syncInProgress = true;
+  anySyncInProgress = true;
   try {
-    const result = await runSync(trigger);
-    lastSyncResult = { ...result, trigger, at: new Date().toISOString() };
-    lastSyncError = null;
+    const result = await runSync(walletId, trigger);
+    s.lastSyncResult = { ...result, trigger, at: new Date().toISOString() };
+    s.lastSyncError = null;
     return result;
   } catch (e) {
-    lastSyncError = { message: e.message, trigger, at: new Date().toISOString() };
+    s.lastSyncError = { message: e.message, trigger, at: new Date().toISOString() };
     throw e;
   } finally {
-    syncInProgress = false;
+    s.syncInProgress = false;
+    anySyncInProgress = Object.values(walletState).some((x) => x.syncInProgress);
   }
+}
+
+// Helper — extract walletId from query string or body, default to BCB
+function getWalletFromQuery(reqUrl) {
+  const u = new URL(reqUrl, "http://x");
+  return u.searchParams.get("wallet") || "BCB";
 }
 
 // ─── HTTP server ───────────────────────────────────────────────
@@ -62,219 +75,219 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-API-Key");
   if (req.method === "OPTIONS") return send(204, {});
 
-  // GET /health — no auth, just a liveness check
-  if (req.method === "GET" && req.url === "/health") {
+  // GET /health — no auth, liveness + per-wallet status
+  if (req.method === "GET" && req.url.startsWith("/health")) {
     return send(200, {
       ok: true,
       service: "bcb-sync",
-      version: "1.0.0",
-      syncInProgress,
-      lastSyncResult,
-      lastSyncError,
+      version: "2.0.0",
+      enabledWallets: listEnabledWallets(),
+      wallets: walletState,
+      anySyncInProgress,
     });
   }
 
-  // POST /sync — requires X-API-Key header
-  if (req.method === "POST" && req.url === "/sync") {
+  // Auth check helper
+  const requireAuth = () => {
     const auth = req.headers["x-api-key"];
     if (auth !== SYNC_API_KEY) {
-      return send(401, { error: "Unauthorized" });
+      send(401, { error: "Unauthorized" });
+      return false;
     }
-    if (syncInProgress) {
-      return send(409, { error: "Sync already in progress", retryAfter: 60 });
+    return true;
+  };
+
+  // Read JSON body helper
+  const readBody = async () => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    try { return JSON.parse(body); } catch { return null; }
+  };
+
+  // POST /sync — sync ALL wallets sequentially (or one if ?wallet=X)
+  if (req.method === "POST" && req.url.startsWith("/sync") && !req.url.startsWith("/sync/start")) {
+    if (!requireAuth()) return;
+    const wallet = getWalletFromQuery(req.url);
+    if (req.url.includes("?wallet=") || wallet !== "BCB" || req.url === "/sync?wallet=BCB") {
+      try {
+        const r = await safeRunSync(wallet, "manual");
+        return send(200, r);
+      } catch (e) { return send(500, { error: e.message }); }
     }
     try {
-      const result = await safeRunSync("manual");
-      return send(200, result);
-    } catch (e) {
-      return send(500, { error: e.message });
-    }
+      const r = await runAllWalletsSync("manual");
+      return send(200, r);
+    } catch (e) { return send(500, { error: e.message }); }
   }
 
-  // POST /range — date-range query. Body: { from: "YYYY-MM-DD", to: "..." }
-  // Returns per-platform totals for that window. Does NOT write to DB.
+  // POST /sync/start — async sync (Refresh button). Body: { wallet }
+  if (req.method === "POST" && req.url === "/sync/start") {
+    if (!requireAuth()) return;
+    const body = await readBody();
+    const wallet = body?.wallet || "BCB";
+    if (!walletState[wallet]) return send(400, { error: `Unknown wallet ${wallet}` });
+    if (walletState[wallet].syncInProgress) {
+      return send(409, { error: `${wallet} sync already in progress` });
+    }
+    try {
+      const jobId = startSyncJob(wallet);
+      return send(202, { jobId, status: "running", wallet });
+    } catch (e) { return send(500, { error: e.message }); }
+  }
+
+  // POST /range — synchronous range query. Body: { wallet, from, to }
   if (req.method === "POST" && req.url === "/range") {
-    const auth = req.headers["x-api-key"];
-    if (auth !== SYNC_API_KEY) return send(401, { error: "Unauthorized" });
-
-    let body = "";
-    for await (const chunk of req) body += chunk;
-    let parsed;
-    try { parsed = JSON.parse(body); }
-    catch { return send(400, { error: "Body must be JSON" }); }
-
-    const { from, to } = parsed || {};
+    if (!requireAuth()) return;
+    const body = await readBody();
+    if (!body) return send(400, { error: "Body must be JSON" });
+    const { wallet = "BCB", from, to } = body;
     const dateRe = /^\d{4}-\d{2}-\d{2}$/;
     if (!from || !to || !dateRe.test(from) || !dateRe.test(to)) {
-      return send(400, { error: "Need `from` and `to` as YYYY-MM-DD" });
+      return send(400, { error: "Need from and to as YYYY-MM-DD" });
     }
+    if (!walletState[wallet]) return send(400, { error: `Unknown wallet ${wallet}` });
     try {
-      const result = await runRangeSyncCached(from, to);
-      return send(200, result);
-    } catch (e) {
-      return send(500, { error: e.message });
-    }
+      const r = await runRangeSyncCached(wallet, from, to);
+      return send(200, r);
+    } catch (e) { return send(500, { error: e.message }); }
   }
 
-  // POST /range/start — kick off a range job, returns jobId immediately
+  // POST /range/start — async range query. Body: { wallet, from, to }
   if (req.method === "POST" && req.url === "/range/start") {
-    const auth = req.headers["x-api-key"];
-    if (auth !== SYNC_API_KEY) return send(401, { error: "Unauthorized" });
-
-    let body = "";
-    for await (const chunk of req) body += chunk;
-    let parsed;
-    try { parsed = JSON.parse(body); }
-    catch { return send(400, { error: "Body must be JSON" }); }
-
-    const { from, to } = parsed || {};
+    if (!requireAuth()) return;
+    const body = await readBody();
+    if (!body) return send(400, { error: "Body must be JSON" });
+    const { wallet = "BCB", from, to } = body;
     const dateRe = /^\d{4}-\d{2}-\d{2}$/;
     if (!from || !to || !dateRe.test(from) || !dateRe.test(to)) {
-      return send(400, { error: "Need `from` and `to` as YYYY-MM-DD" });
+      return send(400, { error: "Need from and to as YYYY-MM-DD" });
     }
+    if (!walletState[wallet]) return send(400, { error: `Unknown wallet ${wallet}` });
     try {
-      const jobId = startRangeJob(from, to);
+      const jobId = startRangeJob(wallet, from, to);
       const job = getJob(jobId);
-      return send(202, { jobId, status: job.status, from, to });
-    } catch (e) {
-      return send(500, { error: e.message });
-    }
+      return send(202, { jobId, status: job.status, wallet, from, to });
+    } catch (e) { return send(500, { error: e.message }); }
   }
 
-  // GET /range/status?id=X — poll job status (fast, no long wait)
+  // GET /range/status?id=X — poll job
   if (req.method === "GET" && req.url.startsWith("/range/status")) {
-    const auth = req.headers["x-api-key"];
-    if (auth !== SYNC_API_KEY) return send(401, { error: "Unauthorized" });
-
+    if (!requireAuth()) return;
     const u = new URL(req.url, "http://x");
     const jobId = u.searchParams.get("id");
     if (!jobId) return send(400, { error: "Need ?id=jobId" });
-
     const job = getJob(jobId);
     if (!job) return send(404, { error: "Job not found (may have expired)" });
     return send(200, job);
   }
 
-  // POST /sync/start — kick off a manual sync job (Refresh button)
-  if (req.method === "POST" && req.url === "/sync/start") {
-    const auth = req.headers["x-api-key"];
-    if (auth !== SYNC_API_KEY) return send(401, { error: "Unauthorized" });
-    if (syncInProgress) {
-      return send(409, { error: "Sync already in progress" });
-    }
-    try {
-      const jobId = startSyncJob();
-      return send(202, { jobId, status: "running" });
-    } catch (e) {
-      return send(500, { error: e.message });
-    }
-  }
-
-  // POST /backfill/start — kick off a backward snapshot-fill job
+  // POST /backfill/start — start backfill. Body: { wallet }
   if (req.method === "POST" && req.url === "/backfill/start") {
-    const auth = req.headers["x-api-key"];
-    if (auth !== SYNC_API_KEY) return send(401, { error: "Unauthorized" });
+    if (!requireAuth()) return;
+    const body = await readBody();
+    const wallet = body?.wallet || "BCB";
+    if (!walletState[wallet]) return send(400, { error: `Unknown wallet ${wallet}` });
     try {
-      const jobId = startBackfillJob();
-      return send(202, { jobId, status: "running" });
-    } catch (e) {
-      return send(500, { error: e.message });
-    }
+      const jobId = startBackfillJob(wallet);
+      return send(202, { jobId, status: "running", wallet });
+    } catch (e) { return send(500, { error: e.message }); }
   }
 
   return send(404, {
     error: "Not Found",
     availableEndpoints: [
-      "GET /health", "POST /sync",
-      "POST /range", "POST /range/start", "GET /range/status?id=X",
-      "POST /backfill/start"
-    ]
+      "GET /health",
+      "POST /sync (all) | /sync?wallet=X",
+      "POST /sync/start { wallet }",
+      "POST /range { wallet, from, to }",
+      "POST /range/start { wallet, from, to }",
+      "GET /range/status?id=X",
+      "POST /backfill/start { wallet }",
+    ],
   });
 });
 
 server.listen(PORT, () => {
-  console.log(`BCB sync service listening on port ${PORT}`);
+  console.log(`Multi-wallet sync service listening on port ${PORT}`);
+  console.log(`Enabled wallets: ${listEnabledWallets().join(", ")}`);
   console.log(`Auto-sync interval: ${SYNC_INTERVAL_MIN} min`);
 });
 
-// ─── Startup sync ──────────────────────────────────────────────
-console.log("Running initial startup sync...");
-safeRunSync("startup").catch((e) =>
-  console.error("Startup sync failed:", e.message)
-);
+// ─── Startup sync — sync every enabled wallet ──────────────────
+console.log("Running initial startup sync for all wallets…");
+(async () => {
+  for (const w of listEnabledWallets()) {
+    safeRunSync(w, "startup").catch((e) => console.error(`Startup sync ${w} failed:`, e.message));
+  }
+})();
 
-// ─── Periodic sync ─────────────────────────────────────────────
-setInterval(() => {
-  if (syncInProgress) {
+// ─── Periodic sync (every 10 min) ──────────────────────────────
+setInterval(async () => {
+  if (anySyncInProgress) {
     console.log("Skipping scheduled sync — previous still running");
     return;
   }
-  // Yield to user-initiated range jobs — they're more time-sensitive.
   if (isRangeJobRunning()) {
     console.log("Skipping scheduled sync — range job(s) active");
     return;
   }
-  safeRunSync("cron").catch((e) =>
-    console.error("Cron sync failed:", e.message)
-  );
+  for (const w of listEnabledWallets()) {
+    safeRunSync(w, "cron").catch((e) => console.error(`Cron sync ${w} failed:`, e.message));
+  }
 }, SYNC_INTERVAL_MIN * 60 * 1000);
 
-// ─── Periodic pre-compute of common date ranges ────────────────
-// Runs every 30 min so the 5 common ranges (today / last 7d / last 30d /
-// this month / last month) feel instant when the user clicks them.
+// ─── Periodic pre-compute of common ranges (per wallet) ────────
 let preComputeInProgress = false;
 const PRECOMPUTE_INTERVAL_MIN = 30;
 
 async function runPreCompute() {
-  if (preComputeInProgress || syncInProgress || isRangeJobRunning()) {
+  if (preComputeInProgress || anySyncInProgress || isRangeJobRunning()) {
     console.log("Skipping pre-compute — other work in progress");
     return;
   }
   preComputeInProgress = true;
   try {
-    await preComputeCommonRanges();
-  } catch (e) {
-    console.error("Pre-compute failed:", e.message);
+    for (const w of listEnabledWallets()) {
+      try { await preComputeCommonRanges(w); }
+      catch (e) { console.warn(`Pre-compute ${w}: ${e.message}`); }
+    }
   } finally {
     preComputeInProgress = false;
   }
 }
-
-// Kick off first pre-compute after startup sync (~3 min in)
 setTimeout(() => runPreCompute(), 3 * 60 * 1000);
 setInterval(runPreCompute, PRECOMPUTE_INTERVAL_MIN * 60 * 1000);
 
-// ─── Nightly snapshot — takes yesterday's lifetime totals ──────
-// Runs at 00:30 Malaysia time (16:30 UTC). Stores a permanent row per
-// platform in bcb_lifetime_snapshots so range queries become instant.
+// ─── Nightly snapshot (per wallet, 00:30 MY = 16:30 UTC) ───────
 async function nightlySnapshot() {
-  if (syncInProgress || isRangeJobRunning()) {
+  if (anySyncInProgress || isRangeJobRunning()) {
     console.log("Skipping nightly snapshot — other work in progress");
     return;
   }
   const yesterday = addDaysISO(fmtDateOnly(new Date()), -1);
-  console.log(`[nightly] taking snapshot for ${yesterday}…`);
-  try {
-    await takeLifetimeSnapshotForDate(yesterday);
-  } catch (e) {
-    console.error("Nightly snapshot failed:", e.message);
+  for (const w of listEnabledWallets()) {
+    try {
+      console.log(`[nightly ${w}] taking snapshot for ${yesterday}…`);
+      await takeLifetimeSnapshotForDate(w, yesterday);
+    } catch (e) {
+      console.error(`Nightly snapshot ${w} failed:`, e.message);
+    }
   }
 }
 function scheduleNightlySnapshot() {
   const next = new Date();
-  next.setUTCHours(16, 30, 0, 0); // 00:30 MY = 16:30 UTC
+  next.setUTCHours(16, 30, 0, 0);
   if (next <= new Date()) next.setUTCDate(next.getUTCDate() + 1);
   const delayMs = next.getTime() - Date.now();
   console.log(`[nightly] next snapshot in ${(delayMs / 60000).toFixed(1)} min`);
   setTimeout(() => {
     nightlySnapshot().finally(() => {
-      setInterval(nightlySnapshot, 24 * 60 * 60 * 1000); // every 24h after
+      setInterval(nightlySnapshot, 24 * 60 * 60 * 1000);
     });
   }, delayMs);
 }
 scheduleNightlySnapshot();
 
-// ─── Graceful shutdown ─────────────────────────────────────────
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, shutting down...");
   server.close(() => process.exit(0));
