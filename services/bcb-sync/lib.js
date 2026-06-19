@@ -39,6 +39,21 @@ const WALLETS = {
     accessId: process.env.V12MY_ACCESS_ID,
     accessToken: process.env.V12MY_ACCESS_TOKEN,
   },
+  BVBX: {
+    baseUrl: process.env.BVBX_API_BASE_URL,
+    accessId: process.env.BVBX_ACCESS_ID,
+    accessToken: process.env.BVBX_ACCESS_TOKEN,
+  },
+  TTBET: {
+    baseUrl: process.env.TTBET_API_BASE_URL,
+    accessId: process.env.TTBET_ACCESS_ID,
+    accessToken: process.env.TTBET_ACCESS_TOKEN,
+  },
+  X44: {
+    baseUrl: process.env.X44_API_BASE_URL,
+    accessId: process.env.X44_ACCESS_ID,
+    accessToken: process.env.X44_ACCESS_TOKEN,
+  },
 };
 function listEnabledWallets() {
   return Object.entries(WALLETS)
@@ -562,6 +577,18 @@ async function tryRangeFromSnapshots(walletId, from, to) {
   const today = fmtDateOnly(new Date());
   const fromMinus1 = addDaysISO(from, -1);
 
+  // Source of truth for "which platforms belong to this wallet". We use this
+  // to check whether each snapshot side (to and from-1) actually covers
+  // every expected platform. If a snapshot is incomplete (some platforms
+  // still backfilling), we'd compute an under-counted total — so we bail
+  // and let the slow-but-correct live API path take over.
+  const { data: expectedPlatformRows, error: ep } = await supabase
+    .from("bcb_platforms")
+    .select("name")
+    .eq("wallet", walletId);
+  if (ep || !expectedPlatformRows || expectedPlatformRows.length === 0) return null;
+  const expectedNames = expectedPlatformRows.map((r) => r.name);
+
   // Fetch "to" lifetimes (live for today, snapshot otherwise)
   let toRows;
   if (to >= today) {
@@ -585,6 +612,14 @@ async function tryRangeFromSnapshots(walletId, from, to) {
       .eq("wallet", walletId)
       .eq("date", to);
     if (error || !data || data.length === 0) return null;
+    // Verify the `to` snapshot covers EVERY expected platform. If anything
+    // is missing (backfill still in progress for that date), bail.
+    const gotToNames = new Set(data.map((r) => r.platform_name));
+    const missingTo = expectedNames.filter((n) => !gotToNames.has(n));
+    if (missingTo.length > 0) {
+      console.log(`[snapshot] ${walletId} ${to} missing ${missingTo.join(",")} — falling back to live`);
+      return null;
+    }
     toRows = data.map((r) => ({
       name: r.platform_name,
       depositingMembers: r.depositing_members,
@@ -601,8 +636,22 @@ async function tryRangeFromSnapshots(walletId, from, to) {
     .eq("wallet", walletId)
     .eq("date", fromMinus1);
   if (e2) return null;
+
+  // If the (from-1) snapshot is missing or doesn't cover every platform,
+  // fall back to live. Otherwise we'd silently use 0 for missing platforms,
+  // which makes "yesterday's range" look like the full lifetime — exactly
+  // the bug V12MY hit while historical backfill was running.
+  if (!fromMinus1Rows || fromMinus1Rows.length === 0) {
+    console.log(`[snapshot] ${walletId} missing snapshot for ${fromMinus1} — falling back to live`);
+    return null;
+  }
   const fromMap = new Map();
-  for (const r of fromMinus1Rows || []) fromMap.set(r.platform_name, r);
+  for (const r of fromMinus1Rows) fromMap.set(r.platform_name, r);
+  const missingFrom = expectedNames.filter((n) => !fromMap.has(n));
+  if (missingFrom.length > 0) {
+    console.log(`[snapshot] ${walletId} ${fromMinus1} missing ${missingFrom.join(",")} — falling back to live`);
+    return null;
+  }
 
   // For each platform, compute the diff
   const platforms = toRows.map((to_) => {
@@ -713,11 +762,24 @@ async function takeLifetimeSnapshotForDate(walletId, date, { force = false } = {
 // Walks back from yesterday to platform_earliest_start, taking one
 // snapshot per day. Yields whenever a user-initiated range query is
 // running so the BCB API budget goes to the user first.
+//
+// All 5 wallets can backfill in parallel — the droplet has 8 GB RAM,
+// so 5 × 6 platforms × 40 concurrent users (≈ 1200 in-flight HTTPs)
+// fits easily. A duplicate trigger for a wallet already backfilling
+// is a no-op, not a second concurrent job for the same wallet.
 let backfillRunning = false;
 function isBackfillRunning() { return backfillRunning; }
+const walletBackfillRunning = new Set();
 
 async function startBackfillJob(walletId) {
   if (!walletId) throw new Error("startBackfillJob requires walletId");
+
+  if (walletBackfillRunning.has(walletId)) {
+    console.log(`[backfill] ${walletId} already running — ignoring duplicate trigger`);
+    return null;
+  }
+  walletBackfillRunning.add(walletId);
+
   const jobId = randomUUID();
   jobs.set(jobId, {
     status: "running",
@@ -733,6 +795,7 @@ async function startBackfillJob(walletId) {
   });
 
   backfillRunning = true;
+  console.log(`[backfill] ${walletId} START (running wallets: ${walletBackfillRunning.size})`);
   (async () => {
     try {
       const { data: platforms } = await supabase
@@ -780,10 +843,15 @@ async function startBackfillJob(walletId) {
       }
 
       finishJob(jobId, { result: { ok: true, wallet: walletId, totalDays: dates.length } });
+      console.log(`[backfill] ${walletId} DONE (${walletBackfillRunning.size - 1} wallets still running)`);
     } catch (e) {
       finishJob(jobId, { error: e });
+      console.log(`[backfill] ${walletId} ERRORED: ${e.message}`);
     } finally {
-      backfillRunning = false;
+      walletBackfillRunning.delete(walletId);
+      // backfillRunning stays true if any wallet is still backfilling — used
+      // by the cron sync to know it shouldn't pile on top of backfill work.
+      backfillRunning = walletBackfillRunning.size > 0;
     }
   })();
 

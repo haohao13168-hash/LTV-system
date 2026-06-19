@@ -188,7 +188,9 @@ const server = http.createServer(async (req, res) => {
     const wallet = body?.wallet || "BCB";
     if (!walletState[wallet]) return send(400, { error: `Unknown wallet ${wallet}` });
     try {
-      const jobId = startBackfillJob(wallet);
+      // startBackfillJob is async; without await the response serializes
+      // the Promise as `{}` instead of the real jobId string.
+      const jobId = await startBackfillJob(wallet);
       return send(202, { jobId, status: "running", wallet });
     } catch (e) { return send(500, { error: e.message }); }
   }
@@ -291,4 +293,15 @@ scheduleNightlySnapshot();
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, shutting down...");
   server.close(() => process.exit(0));
+});
+
+// Without these, an unhandled promise rejection (very common during
+// backfill — one bad BCB API response can do it) crashes the process,
+// pm2 restarts, in-memory backfill jobs are lost, and we make zero
+// long-term progress. Log + swallow so the next iteration retries.
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
 });

@@ -10,6 +10,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useStore } from "@/lib/store";
 import { useAuth, can } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
+import { downloadCSV } from "@/lib/csv";
+import TrendChart from "@/components/TrendChart";
 
 function fmtNum(n) { return new Intl.NumberFormat("en-US").format(n); }
 function fmtMoney(n) { return new Intl.NumberFormat("en-US").format(Math.round(n)); }
@@ -35,6 +37,20 @@ function IconRefresh({ className = "h-4 w-4", spinning = false }) {
       <path d="M3 12a9 9 0 0 1 15.5-6.36L21 8" />
       <path d="M21 3v5h-5" />
       <path d="M3 21v-5h5" />
+    </svg>
+  );
+}
+
+function IconDownload({ className = "h-4 w-4" }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"
+    >
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
     </svg>
   );
 }
@@ -125,8 +141,44 @@ export default function BcbDailyReport({ walletId = "BCB" }) {
     await loadSnapshots();
   };
 
+  // Chart needs chronological order (oldest → newest); the table sorts
+  // newest → oldest. Both share the same dailyActivity computation, just
+  // a reversed view for the chart.
+  const chartData = useMemo(
+    () => [...dailyActivity].reverse().map((row) => ({
+      date: row.date,
+      deposit: row.deposit,
+      withdraw: row.withdraw,
+      net: row.deposit - row.withdraw,
+    })),
+    [dailyActivity]
+  );
+
+  const onExportCSV = () => {
+    if (!dailyActivity.length) return;
+    const rows = dailyActivity.map((row) => ({
+      date: row.date,
+      members: row.members,
+      deposit: Math.round(row.deposit),
+      withdraw: Math.round(row.withdraw),
+      net: Math.round(row.deposit - row.withdraw),
+    }));
+    downloadCSV(`${walletId}_daily_${rows[rows.length - 1].date}_to_${rows[0].date}`, rows, [
+      { key: "date", label: "Date" },
+      { key: "members", label: "Members" },
+      { key: "deposit", label: "Deposit (RM)" },
+      { key: "withdraw", label: "Withdraw (RM)" },
+      { key: "net", label: "Net (RM)" },
+    ]);
+  };
+
   return (
-    <div className="bg-surface border border-border rounded-lg overflow-hidden shadow-card">
+    <div className="space-y-4">
+      {chartData.length > 0 && (
+        <TrendChart data={chartData} title={`${walletId} — Daily Trend`} height={240} />
+      )}
+
+      <div className="bg-surface border border-border rounded-lg overflow-hidden shadow-card">
       <div className="px-5 py-3.5 border-b border-border flex items-center justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-text">Daily Report</h2>
@@ -134,17 +186,29 @@ export default function BcbDailyReport({ walletId = "BCB" }) {
             Live per-day deposit / withdraw across all 6 BCB platforms
           </p>
         </div>
-        {canRefresh && (
+        <div className="flex items-center gap-2">
           <button
-            onClick={refresh}
-            disabled={bcbSyncing}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md border border-border text-text hover:bg-surfaceHover transition-colors disabled:opacity-60 disabled:cursor-wait"
-            title="Re-sync BCB wallet and reload snapshots"
+            type="button"
+            onClick={onExportCSV}
+            disabled={!dailyActivity.length}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md border border-border text-text hover:bg-surfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Download these daily rows as CSV"
           >
-            <IconRefresh className="h-3.5 w-3.5" spinning={bcbSyncing} />
-            <span>{bcbSyncing ? "Syncing… (~75s)" : "Refresh today"}</span>
+            <IconDownload className="h-3.5 w-3.5" />
+            <span>CSV</span>
           </button>
-        )}
+          {canRefresh && (
+            <button
+              onClick={refresh}
+              disabled={bcbSyncing}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-md border border-border text-text hover:bg-surfaceHover transition-colors disabled:opacity-60 disabled:cursor-wait"
+              title="Re-sync BCB wallet and reload snapshots"
+            >
+              <IconRefresh className="h-3.5 w-3.5" spinning={bcbSyncing} />
+              <span>{bcbSyncing ? "Syncing… (~75s)" : "Refresh today"}</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -193,6 +257,7 @@ export default function BcbDailyReport({ walletId = "BCB" }) {
           </table>
         </div>
       )}
+      </div>
     </div>
   );
 }
