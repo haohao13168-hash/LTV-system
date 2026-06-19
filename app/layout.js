@@ -6,8 +6,8 @@ import { AuthProvider } from "@/lib/auth";
 import AppShell from "@/components/AppShell";
 
 export const metadata = {
-  title: "Marketing Console",
-  description: "Internal marketing data admin panel",
+  title: "LTV-PNS-DASH",
+  description: "Lifetime value & partner-network dashboard",
 };
 
 const PRE_HYDRATE = `(function(){

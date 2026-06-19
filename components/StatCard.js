@@ -18,21 +18,21 @@ export default function StatCard({ label, value, sub, icon: Icon, tint }) {
     : "bg-background border-border text-muted";
 
   return (
-    <div className="bg-surface border border-border rounded-lg p-5 shadow-card transition-colors">
+    <div className="bg-surface border border-border rounded-xl p-6 transition-colors hover:border-border/70">
       <div className="flex items-start justify-between gap-3">
-        <div className="text-[11px] text-muted uppercase tracking-[0.08em] font-medium">
+        <div className="text-[10.5px] text-muted uppercase tracking-[0.14em] font-medium">
           {label}
         </div>
         {Icon && (
-          <div className={`h-8 w-8 rounded-md border flex items-center justify-center shrink-0 ${tintCls}`}>
-            <Icon className="h-4 w-4" />
+          <div className={`h-9 w-9 rounded-lg border flex items-center justify-center shrink-0 ${tintCls}`}>
+            <Icon className="h-[18px] w-[18px]" />
           </div>
         )}
       </div>
-      <div className="mt-4 text-[26px] leading-none font-semibold text-text tabular-nums tracking-tight">
+      <div className="mt-5 text-[30px] leading-none font-semibold text-text tabular-nums tracking-[-0.02em]">
         {value}
       </div>
-      {sub && <div className="mt-2 text-[11px] text-muted">{sub}</div>}
+      {sub && <div className="mt-2.5 text-[11px] text-muted">{sub}</div>}
     </div>
   );
 }

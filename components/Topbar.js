@@ -54,27 +54,29 @@ export default function Topbar() {
     : initial.charAt(0);
 
   return (
-    <header className="h-14 border-b border-border bg-background/80 backdrop-blur sticky top-0 z-20">
-      <div className="h-full flex items-center justify-end px-6">
-        <div className="flex items-center gap-2.5">
+    <header className="h-16 border-b border-border bg-background sticky top-0 z-20">
+      <div className="h-full flex items-center justify-end px-7">
+        <div className="flex items-center gap-2">
           <button
             onClick={() => update({ theme: isDark ? "light" : "dark" })}
-            className="h-8 w-8 inline-flex items-center justify-center rounded-md border border-border bg-surface text-muted hover:text-text hover:bg-surfaceHover transition-colors"
+            className="h-9 w-9 inline-flex items-center justify-center rounded-lg text-muted hover:text-text hover:bg-surfaceHover transition-colors"
             title={isDark ? t("light") : t("dark")}
           >
-            {isDark ? <IconSun className="h-4 w-4" /> : <IconMoon className="h-4 w-4" />}
+            {isDark ? <IconSun className="h-[18px] w-[18px]" /> : <IconMoon className="h-[18px] w-[18px]" />}
           </button>
 
           <LanguageToggle />
+
+          <div className="h-5 w-px bg-border mx-1" />
 
           {/* User menu */}
           <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen((o) => !o)}
-              className="h-8 w-8 rounded-full bg-accent/15 border border-accent/30 flex items-center justify-center font-semibold text-accent tabular-nums leading-none hover:bg-accent/20 transition-colors"
+              className="h-9 w-9 rounded-full bg-accent/12 border border-accent/30 flex items-center justify-center font-semibold text-accent leading-none hover:bg-accent/20 transition-colors"
               title={currentUser?.name || t("signIn")}
             >
-              <span className="text-[12px]">{userInitial}</span>
+              <span className="text-[12.5px]">{userInitial}</span>
             </button>
 
             {menuOpen && currentUser && (

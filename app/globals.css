@@ -2,32 +2,36 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Inter — variable font, used everywhere. Tighter, more refined display
+   axis for the body, optical-size adjustment for premium headlines. */
+@import url("https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&family=JetBrains+Mono:wght@400;500&display=swap");
+
 /* ============================================================
    Theme tokens
    ============================================================ */
 
-/* Dark (default) */
+/* Dark (default) — deeper, slightly cooler near-black */
 :root,
 [data-theme="dark"] {
-  --color-background:   240 5% 5%;
-  --color-surface:      240 7% 9%;
-  --color-surfaceHover: 240 8% 12%;
-  --color-border:       240 8% 17%;
-  --color-muted:        240 5% 60%;
-  --color-text:         240 4% 92%;
+  --color-background:   222 24% 5%;
+  --color-surface:      222 22% 8%;
+  --color-surfaceHover: 222 20% 12%;
+  --color-border:       222 14% 16%;
+  --color-muted:        222 9% 55%;
+  --color-text:         210 17% 95%;
   --color-shadow:       0 0% 0%;
   --color-accent-text:  0 0% 100%;
 }
 
-/* Light */
+/* Light — clean off-white, never bone */
 [data-theme="light"] {
-  --color-background:   240 12% 98%;
+  --color-background:   210 30% 99%;
   --color-surface:      0 0% 100%;
-  --color-surfaceHover: 240 12% 96%;
-  --color-border:       240 8% 88%;
-  --color-muted:        240 4% 42%;
-  --color-text:         240 16% 12%;
-  --color-shadow:       240 10% 10%;
+  --color-surfaceHover: 210 25% 96%;
+  --color-border:       220 13% 91%;
+  --color-muted:        220 9% 46%;
+  --color-text:         222 47% 11%;
+  --color-shadow:       220 30% 20%;
   --color-accent-text:  0 0% 100%;
 }
 
@@ -47,10 +51,21 @@
 html, body {
   background-color: hsl(var(--color-background));
   color: hsl(var(--color-text));
-  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Premium type: contextual alternates, tabular figures for data tables,
+     case-sensitive forms, and Inter's "cv11" variant for a single-storey "a" */
+  font-feature-settings: "cv11", "ss01", "ss03", "case", "cpsp";
+  font-optical-sizing: auto;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  letter-spacing: -0.005em;
+}
+
+/* Tabular numbers for any element that wants them (numbers in tables, cards) */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
 }
 
 * { box-sizing: border-box; }

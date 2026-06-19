@@ -52,54 +52,53 @@ export default function Sidebar() {
     initialLen === 5 ? "text-[8px]"  :
                        "text-[7px]";
 
+  // Premium nav-item — left accent bar on active, no box outline, generous padding.
+  const navItem = (active) =>
+    `relative flex items-center gap-3 pl-4 pr-3 py-2.5 text-[13.5px] font-medium transition-colors ${
+      active ? "text-text" : "text-muted hover:text-text"
+    }`;
+  const railBar = (active) =>
+    `absolute left-0 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-r ${
+      active ? "bg-accent" : "bg-transparent"
+    }`;
+
   return (
-    <aside className="hidden md:flex md:flex-col w-60 shrink-0 border-r border-border bg-background">
+    <aside className="hidden md:flex md:flex-col w-64 shrink-0 border-r border-border bg-background">
       {/* Brand */}
-      <div className="h-14 flex items-center px-5 border-b border-border">
-        <div className="h-7 w-7 rounded-md bg-accent/15 border border-accent/30 flex items-center justify-center mr-2.5 shrink-0">
-          <span className={`text-accent font-semibold tabular-nums leading-none ${initialTextCls}`}>{initialRaw}</span>
+      <div className="h-16 flex items-center px-5 border-b border-border">
+        <div className="h-9 w-9 rounded-lg bg-accent/10 border border-accent/25 flex items-center justify-center mr-3 shrink-0">
+          <span className={`text-accent font-bold leading-none tracking-tight ${initialTextCls}`}>{initialRaw}</span>
         </div>
-        <div className="min-w-0">
-          <div className="text-sm font-semibold text-text leading-tight truncate" title={settings.brandName}>
+        <div className="min-w-0 leading-tight">
+          <div className="text-[14px] font-semibold text-text truncate tracking-tight" title={settings.brandName}>
             {settings.brandName}
           </div>
-          <div className="text-[10px] uppercase tracking-wider text-muted leading-tight">{t("appTag")}</div>
+          <div className="text-[10px] uppercase tracking-[0.14em] text-muted mt-0.5">{t("appTag")}</div>
         </div>
       </div>
 
-      <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
+      <nav className="flex-1 px-0 py-5 overflow-y-auto">
         {/* Dashboard */}
-        <Link
-          href="/"
-          className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors ${
-            dashboardActive
-              ? "bg-accent/10 text-accent border border-accent/20"
-              : "text-muted hover:text-text hover:bg-surface/60 border border-transparent"
-          }`}
-        >
-          <IconDashboard className="h-4 w-4" />
-          <span className="font-medium">{t("navDashboard")}</span>
+        <Link href="/" className={navItem(dashboardActive)}>
+          <span className={railBar(dashboardActive)} />
+          <IconDashboard className="h-[18px] w-[18px]" />
+          <span>{t("navDashboard")}</span>
         </Link>
 
         {/* Companies group */}
-        <div>
-          <div
-            className={`flex items-center gap-1 rounded-md text-sm transition-colors ${
-              companiesActive
-                ? "bg-accent/10 text-accent border border-accent/20"
-                : "border border-transparent text-muted hover:text-text hover:bg-surface/60"
-            }`}
-          >
+        <div className="mt-0.5">
+          <div className={`relative flex items-center ${companiesActive ? "text-text" : "text-muted hover:text-text"}`}>
+            <span className={railBar(companiesActive)} />
             <Link
               href="/companies"
-              className="flex items-center gap-2.5 px-3 py-2 flex-1 min-w-0"
+              className="flex items-center gap-3 pl-4 pr-3 py-2.5 flex-1 min-w-0 text-[13.5px] font-medium"
             >
-              <IconBuilding className="h-4 w-4 shrink-0" />
-              <span className="truncate font-medium">{t("navCompanies")}</span>
+              <IconBuilding className="h-[18px] w-[18px] shrink-0" />
+              <span className="truncate">{t("navCompanies")}</span>
             </Link>
             <button
               onClick={() => setCompaniesOpen((v) => !v)}
-              className="p-2 hover:text-text"
+              className="p-2 mr-2 text-muted hover:text-text rounded transition-colors"
               aria-label={companiesOpen ? t("collapse") : t("expand")}
               title={companiesOpen ? t("collapse") : t("expand")}
             >
@@ -112,14 +111,14 @@ export default function Sidebar() {
           </div>
 
           {companiesOpen && (
-            <div className="mt-1 ml-3 pl-3 border-l border-border space-y-0.5">
+            <div className="mt-1 ml-7 pl-3 border-l border-border space-y-0.5">
               {companies.length === 0 ? (
                 <div className="px-3 py-1.5 text-[11px] text-muted italic">
                   {t("noCompanies")}
                 </div>
               ) : (
                 <>
-                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-muted">
+                  <div className="px-3 py-1.5 text-[10px] uppercase tracking-[0.14em] text-muted">
                     {t("yourCompanies")}
                   </div>
                   {companies.map((c) => {
@@ -128,15 +127,15 @@ export default function Sidebar() {
                       <Link
                         key={c.id}
                         href={`/companies/${c.id}`}
-                        className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
+                        className={`flex items-center gap-2.5 px-3 py-1.5 rounded-md text-[12.5px] transition-colors ${
                           active
-                            ? "bg-accent/10 text-accent border border-accent/20"
-                            : "text-muted hover:text-text hover:bg-surface/60 border border-transparent"
+                            ? "text-accent"
+                            : "text-muted hover:text-text"
                         }`}
                         title={c.name}
                       >
                         <CompanyAvatar company={c} size="xs" className="shrink-0" />
-                        <span className="truncate">{c.name}</span>
+                        <span className="truncate font-medium">{c.name}</span>
                       </Link>
                     );
                   })}
@@ -148,45 +147,33 @@ export default function Sidebar() {
 
         {/* Users (admin-only) */}
         {canSeeUsers && (
-          <Link
-            href="/users"
-            className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors ${
-              usersActive
-                ? "bg-accent/10 text-accent border border-accent/20"
-                : "text-muted hover:text-text hover:bg-surface/60 border border-transparent"
-            }`}
-          >
-            <IconUsers className="h-4 w-4" />
-            <span className="font-medium">{t("navUsers")}</span>
+          <Link href="/users" className={`mt-0.5 ${navItem(usersActive)}`}>
+            <span className={railBar(usersActive)} />
+            <IconUsers className="h-[18px] w-[18px]" />
+            <span>{t("navUsers")}</span>
           </Link>
         )}
 
         {/* Settings (admin + agent only) */}
         {canSeeSettings && (
-          <Link
-            href="/settings"
-            className={`flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors ${
-              settingsActive
-                ? "bg-accent/10 text-accent border border-accent/20"
-                : "text-muted hover:text-text hover:bg-surface/60 border border-transparent"
-            }`}
-          >
-            <IconCog className="h-4 w-4" />
-            <span className="font-medium">{t("navSettings")}</span>
+          <Link href="/settings" className={`mt-0.5 ${navItem(settingsActive)}`}>
+            <span className={railBar(settingsActive)} />
+            <IconCog className="h-[18px] w-[18px]" />
+            <span>{t("navSettings")}</span>
           </Link>
         )}
       </nav>
 
       {/* Footer: signed-in user */}
       {currentUser && (
-        <div className="border-t border-border px-3 py-3">
-          <div className="flex items-center gap-2.5 px-2 py-1.5 rounded-md">
-            <div className="h-7 w-7 rounded-full bg-accent/15 border border-accent/30 flex items-center justify-center text-[11px] font-semibold text-accent shrink-0">
+        <div className="border-t border-border px-4 py-4">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-full bg-accent/12 border border-accent/30 flex items-center justify-center text-[12px] font-semibold text-accent shrink-0">
               {(currentUser.name || currentUser.username).charAt(0).toUpperCase()}
             </div>
-            <div className="min-w-0">
-              <div className="text-[12px] text-text font-medium truncate" title={currentUser.name}>{currentUser.name}</div>
-              <div className="text-[10px] text-muted truncate">{roleLabel}</div>
+            <div className="min-w-0 leading-tight">
+              <div className="text-[13px] text-text font-semibold truncate tracking-tight" title={currentUser.name}>{currentUser.name}</div>
+              <div className="text-[10px] uppercase tracking-[0.14em] text-muted mt-0.5">{roleLabel}</div>
             </div>
           </div>
         </div>
