@@ -11,7 +11,6 @@ import { useStore } from "@/lib/store";
 import { useAuth, can } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
 import { downloadCSV } from "@/lib/csv";
-import TrendChart from "@/components/TrendChart";
 
 function fmtNum(n) { return new Intl.NumberFormat("en-US").format(n); }
 function fmtMoney(n) { return new Intl.NumberFormat("en-US").format(Math.round(n)); }
@@ -141,19 +140,6 @@ export default function BcbDailyReport({ walletId = "BCB" }) {
     await loadSnapshots();
   };
 
-  // Chart needs chronological order (oldest → newest); the table sorts
-  // newest → oldest. Both share the same dailyActivity computation, just
-  // a reversed view for the chart.
-  const chartData = useMemo(
-    () => [...dailyActivity].reverse().map((row) => ({
-      date: row.date,
-      deposit: row.deposit,
-      withdraw: row.withdraw,
-      net: row.deposit - row.withdraw,
-    })),
-    [dailyActivity]
-  );
-
   const onExportCSV = () => {
     if (!dailyActivity.length) return;
     const rows = dailyActivity.map((row) => ({
@@ -173,12 +159,7 @@ export default function BcbDailyReport({ walletId = "BCB" }) {
   };
 
   return (
-    <div className="space-y-4">
-      {chartData.length > 0 && (
-        <TrendChart data={chartData} title={`${walletId} — Daily Trend`} height={240} />
-      )}
-
-      <div className="bg-surface border border-border rounded-lg overflow-hidden shadow-card">
+    <div className="bg-surface border border-border rounded-lg overflow-hidden shadow-card">
       <div className="px-5 py-3.5 border-b border-border flex items-center justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold text-text">Daily Report</h2>
@@ -257,7 +238,6 @@ export default function BcbDailyReport({ walletId = "BCB" }) {
           </table>
         </div>
       )}
-      </div>
     </div>
   );
 }
