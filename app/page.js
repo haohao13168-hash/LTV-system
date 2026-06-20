@@ -244,20 +244,20 @@ export default function DashboardPage() {
       </div>
 
       {/* Read-only summary table */}
-      <div className="bg-surface border border-border rounded-lg overflow-hidden shadow-card">
+      <div className="bg-surface border border-border rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-xs uppercase tracking-wider text-muted border-b border-border">
-                <th className="px-5 py-3 font-medium">{t("company")}</th>
-                <th className="px-5 py-3 font-medium text-right">{t("members")}</th>
-                <th className="px-5 py-3 font-medium text-right">{t("deposit")}</th>
-                <th className="px-5 py-3 font-medium text-right">{t("withdraw")}</th>
-                <th className="px-5 py-3 font-medium text-right">{t("net")}</th>
-                <th className="px-5 py-3 font-medium text-right">{t("valuePerMember")}</th>
+              <tr className="text-left text-[10.5px] uppercase tracking-[0.14em] text-muted border-b border-border bg-background/30">
+                <th className="px-6 py-3 font-semibold">{t("company")}</th>
+                <th className="px-6 py-3 font-semibold text-right">{t("members")}</th>
+                <th className="px-6 py-3 font-semibold text-right">{t("deposit")}</th>
+                <th className="px-6 py-3 font-semibold text-right">{t("withdraw")}</th>
+                <th className="px-6 py-3 font-semibold text-right">{t("net")}</th>
+                <th className="px-6 py-3 font-semibold text-right">{t("valuePerMember")}</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y divide-border">
               {companies.map((c) => {
                 // Each row uses the SAME math as the totals above, so when the
                 // user opens that company's page with the same date range,
@@ -265,13 +265,13 @@ export default function DashboardPage() {
                 const s = statsForCompany(c);
                 const perMember = s.members > 0 ? s.net / s.members : 0;
                 return (
-                  <tr key={c.id} className="border-b border-border last:border-0">
-                    <td className="px-5 py-3 text-text">{c.name}</td>
-                    <td className="px-5 py-3 text-right tabular-nums">{fmtNum(s.members)}</td>
-                    <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(s.deposit)}</td>
-                    <td className="px-5 py-3 text-right tabular-nums">{fmtMoney(s.withdraw)}</td>
-                    <td className="px-5 py-3 text-right tabular-nums text-text">{fmtMoney(s.net)}</td>
-                    <td className="px-5 py-3 text-right tabular-nums">{fmtPerMember(perMember)}</td>
+                  <tr key={c.id} className="hover:bg-surfaceHover/40 transition-colors">
+                    <td className="px-6 py-4 text-text font-semibold tracking-tight">{c.name}</td>
+                    <td className="px-6 py-4 text-right tabular-nums text-text">{fmtNum(s.members)}</td>
+                    <td className="px-6 py-4 text-right tabular-nums text-text">{fmtMoney(s.deposit)}</td>
+                    <td className="px-6 py-4 text-right tabular-nums text-muted">{fmtMoney(s.withdraw)}</td>
+                    <td className="px-6 py-4 text-right tabular-nums text-text font-medium">{fmtMoney(s.net)}</td>
+                    <td className="px-6 py-4 text-right tabular-nums text-text">{fmtPerMember(perMember)}</td>
                   </tr>
                 );
               })}
