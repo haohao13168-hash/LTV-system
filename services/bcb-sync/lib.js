@@ -860,6 +860,14 @@ async function startBackfillJob(walletId) {
 
 // Pre-compute the common ranges. Designed to be called from a cron.
 // Runs ranges sequentially so we don't overwhelm BCB API.
+//
+// IMPORTANT — uses runRangeSyncCached, not runRangeSync directly.
+// Cached path tries snapshots first (near-instant DB read); only falls
+// back to the slow live API path when a snapshot is missing. Previously
+// this called runRangeSync directly, which forced 5 wallets × 5 ranges
+// = 25 live API queries every hour even though all the data already
+// existed in bcb_lifetime_snapshots. That backlog hogged the BCB API,
+// dragged user-initiated range queries to multi-minute response times.
 async function preComputeCommonRanges(walletId) {
   if (!walletId) throw new Error("preComputeCommonRanges requires walletId");
   const ranges = computeCommonRanges();
@@ -867,10 +875,12 @@ async function preComputeCommonRanges(walletId) {
   const results = [];
   for (const [name, from, to] of ranges) {
     try {
-      const fresh = await runRangeSync(walletId, from, to);
-      setCachedRange(walletId, from, to, fresh);
-      results.push({ name, from, to, ok: true, duration_ms: fresh.duration_ms });
-      console.log(`  ✓ ${walletId} ${name} (${from}→${to}) — ${(fresh.duration_ms / 1000).toFixed(1)}s`);
+      const fresh = await runRangeSyncCached(walletId, from, to);
+      // runRangeSyncCached already populates the in-memory cache; no
+      // extra setCachedRange call needed for the snapshot path.
+      results.push({ name, from, to, ok: true, duration_ms: fresh.duration_ms || 0 });
+      const dur = fresh.source === "snapshot" ? "snapshot" : `${((fresh.duration_ms || 0) / 1000).toFixed(1)}s`;
+      console.log(`  ✓ ${walletId} ${name} (${from}→${to}) — ${dur}`);
     } catch (e) {
       results.push({ name, from, to, ok: false, error: e.message });
       console.warn(`  ✗ ${walletId} ${name}: ${e.message}`);
