@@ -261,10 +261,20 @@ setTimeout(() => runPreCompute(), 3 * 60 * 1000);
 setInterval(runPreCompute, PRECOMPUTE_INTERVAL_MIN * 60 * 1000);
 
 // ─── Nightly snapshot (per wallet, 00:30 MY = 16:30 UTC) ───────
+// Originally bailed if any sync or range job was active. Problem: at 00:30
+// MY there's a >50% chance the 10-minute cron is still mid-sync, so the
+// nightly silently no-ops and yesterday's snapshot never lands. Date-range
+// queries that touch yesterday then fall back to the slow live API path.
+// Fix: wait (with a cap) for in-flight work to clear, then take the snapshot.
 async function nightlySnapshot() {
-  if (anySyncInProgress || isRangeJobRunning()) {
-    console.log("Skipping nightly snapshot — other work in progress");
-    return;
+  const waitStart = Date.now();
+  const WAIT_LIMIT_MS = 30 * 60 * 1000; // 30 min ceiling, then go anyway
+  while (anySyncInProgress || isRangeJobRunning()) {
+    if (Date.now() - waitStart > WAIT_LIMIT_MS) {
+      console.log("[nightly] 30 min wait exceeded — running snapshot anyway");
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 30 * 1000));
   }
   const yesterday = addDaysISO(fmtDateOnly(new Date()), -1);
   for (const w of listEnabledWallets()) {
