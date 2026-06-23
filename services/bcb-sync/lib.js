@@ -629,28 +629,41 @@ async function tryRangeFromSnapshots(walletId, from, to) {
     }));
   }
 
-  // Fetch "from - 1" snapshot
-  const { data: fromMinus1Rows, error: e2 } = await supabase
-    .from("bcb_lifetime_snapshots")
-    .select("*")
-    .eq("wallet", walletId)
-    .eq("date", fromMinus1);
-  if (e2) return null;
+  // Wallet's earliest start_date — if (from - 1) is older than this, the
+  // wallet didn't exist yet, so its contribution is legitimately 0. We
+  // synthesize an empty fromMap instead of falling back to the live API.
+  const { data: pfStartRows } = await supabase
+    .from("bcb_platforms")
+    .select("start_date")
+    .eq("wallet", walletId);
+  const earliestStart = (pfStartRows || [])
+    .map((r) => r.start_date)
+    .filter(Boolean)
+    .sort()[0];
 
-  // If the (from-1) snapshot is missing or doesn't cover every platform,
-  // fall back to live. Otherwise we'd silently use 0 for missing platforms,
-  // which makes "yesterday's range" look like the full lifetime — exactly
-  // the bug V12MY hit while historical backfill was running.
-  if (!fromMinus1Rows || fromMinus1Rows.length === 0) {
-    console.log(`[snapshot] ${walletId} missing snapshot for ${fromMinus1} — falling back to live`);
-    return null;
-  }
   const fromMap = new Map();
-  for (const r of fromMinus1Rows) fromMap.set(r.platform_name, r);
-  const missingFrom = expectedNames.filter((n) => !fromMap.has(n));
-  if (missingFrom.length > 0) {
-    console.log(`[snapshot] ${walletId} ${fromMinus1} missing ${missingFrom.join(",")} — falling back to live`);
-    return null;
+  if (earliestStart && fromMinus1 < earliestStart) {
+    // Pre-history: leave fromMap empty; the diff below uses 0 for missing
+    // platforms, which is what we want (wallet hadn't started yet).
+    console.log(`[snapshot] ${walletId} ${fromMinus1} pre-dates earliest start ${earliestStart} — treating as 0`);
+  } else {
+    // Fetch "from - 1" snapshot
+    const { data: fromMinus1Rows, error: e2 } = await supabase
+      .from("bcb_lifetime_snapshots")
+      .select("*")
+      .eq("wallet", walletId)
+      .eq("date", fromMinus1);
+    if (e2) return null;
+    if (!fromMinus1Rows || fromMinus1Rows.length === 0) {
+      console.log(`[snapshot] ${walletId} missing snapshot for ${fromMinus1} — falling back to live`);
+      return null;
+    }
+    for (const r of fromMinus1Rows) fromMap.set(r.platform_name, r);
+    const missingFrom = expectedNames.filter((n) => !fromMap.has(n));
+    if (missingFrom.length > 0) {
+      console.log(`[snapshot] ${walletId} ${fromMinus1} missing ${missingFrom.join(",")} — falling back to live`);
+      return null;
+    }
   }
 
   // For each platform, compute the diff
