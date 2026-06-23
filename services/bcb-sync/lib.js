@@ -952,4 +952,5 @@ module.exports = {
   fmtDateOnly,
   api,
   bcb, // back-compat
+  supabase, // exported so server.js can run its own health/heal queries
 };

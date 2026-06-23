@@ -18,6 +18,7 @@ const {
   startBackfillJob,
   addDaysISO,
   fmtDateOnly,
+  supabase,
 } = require("./lib");
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
@@ -259,6 +260,56 @@ async function runPreCompute() {
 }
 setTimeout(() => runPreCompute(), 3 * 60 * 1000);
 setInterval(runPreCompute, PRECOMPUTE_INTERVAL_MIN * 60 * 1000);
+
+// ─── Snapshot self-heal (every 15 min) ────────────────────────
+// Check the last 7 days for every wallet. If any (wallet, date) is
+// missing snapshot rows or has fewer than the expected platform count,
+// auto-trigger takeLifetimeSnapshotForDate for that gap. This catches
+// nightly failures, partial runs, clock skew, and pm2 mid-run kills
+// without anyone having to notice the gap manually.
+let healInProgress = false;
+const HEAL_INTERVAL_MIN = 15;
+const HEAL_LOOKBACK_DAYS = 7;
+async function runSnapshotHeal() {
+  if (healInProgress) return;
+  if (anySyncInProgress || isRangeJobRunning()) return; // try again next tick
+  healInProgress = true;
+  try {
+    const todayMY = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kuala_Lumpur" });
+    const yesterdayMY = addDaysISO(todayMY, -1);
+    const dates = [];
+    let d = yesterdayMY;
+    for (let i = 0; i < HEAL_LOOKBACK_DAYS; i++) {
+      dates.push(d);
+      d = addDaysISO(d, -1);
+    }
+    for (const wallet of listEnabledWallets()) {
+      // Expected platform count for this wallet (from bcb_platforms)
+      const { data: pfRows } = await supabase
+        .from("bcb_platforms").select("name").eq("wallet", wallet);
+      const expected = (pfRows || []).length;
+      if (!expected) continue;
+      for (const date of dates) {
+        const { count } = await supabase
+          .from("bcb_lifetime_snapshots")
+          .select("platform_name", { count: "exact", head: true })
+          .eq("wallet", wallet).eq("date", date);
+        if ((count || 0) >= expected) continue;
+        console.log(`[heal] ${wallet}/${date}: have ${count || 0}/${expected} — filling…`);
+        try {
+          await takeLifetimeSnapshotForDate(wallet, date);
+          console.log(`[heal] ${wallet}/${date} done`);
+        } catch (e) {
+          console.warn(`[heal] ${wallet}/${date} failed: ${e.message}`);
+        }
+      }
+    }
+  } finally {
+    healInProgress = false;
+  }
+}
+setTimeout(() => runSnapshotHeal(), 60 * 1000);
+setInterval(runSnapshotHeal, HEAL_INTERVAL_MIN * 60 * 1000);
 
 // ─── Nightly snapshot (per wallet, 00:30 MY = 16:30 UTC) ───────
 // Two bugs were here. Original code (a) bailed instead of waiting when
